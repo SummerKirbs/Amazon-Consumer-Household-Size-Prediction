@@ -1,9 +1,8 @@
 ---
-title: "STATS 101C: Regression"
+title: "Amazon Consumer Household Size Prediction Model"
 output:
   pdf_document: default
   html_document: default
-date: "2025-12-09"
 ---
 
 ```{r setup, include=FALSE}
