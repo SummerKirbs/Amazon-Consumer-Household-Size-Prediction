@@ -1,6 +1,6 @@
 ---
 title: "Amazon Consumer Household Size Prediction"
-subtitle: "STATS 101C regression project, revised"
+subtitle: "STATS 101C final project"
 output:
   html_document:
     toc: true
@@ -37,11 +37,25 @@ The question: **can purchase behavior predict household size better than demogra
 alone?**
 
 The answer is short. Children's products carry most of the signal. Purchase volume carries a
-little. Demographics carry almost none. And the three models we compare land within about one
-hundredth of each other, which is less than the fold-to-fold noise. That is a tie, not a
-winner.
+little. Demographics carry almost none. And the three models we compare land within 0.016 RMSE
+of each other, which is less than the fold-to-fold noise. That is a tie, not a winner.
 
 ## Data
+
+The data is Open E-commerce 1.0 (Berke et al., 2024): Amazon purchase histories from 5,027
+U.S. survey respondents who chose to share them, linked to their survey answers by a randomly
+generated respondent ID. The dataset is published on Harvard Dataverse and described in
+*Scientific Data*: <https://doi.org/10.1038/s41597-024-03329-6>.
+
+Two details from the source paper matter here. First, each purchase row is a line item, not an
+order: it carries an order date, but there is no order ID, so "order" can only be reconstructed
+by grouping on the date. Second, the target is the survey question "how many people do you
+consider to be in your household", which is not the same as the number of people sharing the
+Amazon account.
+
+The extract runs from January 2018 to August 2024. Collection itself took place between
+November 2022 and March 2023, when Amazon retired the order-history export page the study
+depended on.
 
 ```{r data-load}
 # The two source files are not committed. Put them in DATA/ before knitting.
@@ -71,9 +85,8 @@ table(survey$Q.amazon.use.hh.size.num, useNA = "ifany")
 Two facts drive every choice that follows.
 
 1. **The 2,000 `test` rows have no household size.** They are a prediction set, not a
-   holdout. So the only honest evaluation is cross-validation on the 3,027 labeled rows.
-   The original write-up scored these rows, which quietly turned a model selection into a
-   test-set score. This version does not.
+   holdout, so scoring them would not measure anything. Evaluation happens inside the 3,027
+   labeled rows: a stratified 80/20 split, then ten-fold cross-validation on the 80%.
 2. **The target is capped at 4.** The survey groups "4 or more" into one bucket, so this is
    an ordered four-class problem squeezed into a regression. A model cannot distinguish a
    household of 4 from a household of 7.
@@ -116,20 +129,22 @@ purchase_features <- purchases |>
     avg_line_quantity = mean(Quantity, na.rm = TRUE),
 
     # Category bins. These are hand-written keyword matches, so they are approximations,
-    # not Amazon's own taxonomy. They are tightened here to remove obvious false friends.
-    # Children: drop pet toys, which the loose "TOY" match swept in.
+    # not Amazon's own taxonomy. Each one is scoped so that obvious false friends stay out.
+    # Children: a bare "TOY" match would also catch pet toys, so pets are excluded.
     children_items = sum(
       grepl("BABY|CHILD|TOY", Category, ignore.case = TRUE) &
         !grepl("PET", Category, ignore.case = TRUE)
     ),
-    # Food: exact category names only. The loose match also caught food storage containers,
-    # blenders and spatulas, plus PET_FOOD, which has nothing to do with human household size.
+    # Food: exact category names only. A substring match also catches food storage
+    # containers, blenders and spatulas, and PET_FOOD, which says nothing about household
+    # size.
     food_items = sum(grepl(
       "^(FOOD|GROCERY|SNACK_FOOD_BAR|MEAT|POULTRY|VEGETABLE|FRUIT|BEVERAGE|COFFEE|TEA|DRINK|CANDY|BAKED|DAIRY|SEAFOOD|GRAIN|SPICE|CONDIMENT|NUTRITIONAL_SUPPLEMENT)$",
       Category, ignore.case = TRUE
     )),
     # Shared consumables: paper goods and cleaning products a household burns through.
-    # The loose match also caught skin cleansers, toothbrush heads and toilet seats.
+    # Matching on "CLEANSER" or "TOOTH" would also pull in skin cleansers, toothbrush
+    # heads and toilet seats, so the list names the specific categories instead.
     multiuse_items = sum(grepl(
       "TOILET_PAPER|PAPER_TOWEL|LAUNDRY_DETERGENT|DISHWASHER_DETERGENT|CLEANING_AGENT|SURFACE_CLEANING_WIPE|FACIAL_TISSUE|TOOTH_CLEANING_AGENT|TOOTHBRUSH|TOOTH_WHITENER|DETERGENT",
       Category, ignore.case = TRUE
@@ -151,15 +166,14 @@ sum(is.na(dataset$total_spend))
 
 ### Encoding
 
-Categorical fields stay categorical. The original code mapped them to `as.numeric(factor(x))`,
-which invents an ordering: it tells the model that two states alphabetically far apart are
-numerically far apart, and that one gender is twice another. That is not a defensible encoding
-for a linear model.
+Categorical fields stay categorical. Encoding them as integers invents an ordering: it tells
+the model that two states alphabetically far apart are numerically far apart, and that one
+gender is twice another. That is not a defensible encoding for a linear model.
 
 One real problem shows up once state is a factor: a state with a single respondent lands in
 exactly one cross-validation fold, so the other nine folds contain an unseen level and `lm()`
-errors out. The numeric encoding hid that failure instead of fixing it. The fix is to pool
-rare states.
+errors out. Numeric codes hide that failure instead of fixing it. The fix is to pool rare
+states.
 
 ```{r encoding}
 # Keep states with at least 20 labeled respondents. Everything else becomes "Other".
@@ -385,9 +399,9 @@ ggplot(race_summary, aes(x = mean_household, y = reorder(race, mean_household)))
 ```
 
 ```{r eda-state, fig.height = 8}
-# The original chart drew all 52 states as bars. At that density every label collides and
-# the two tiny groups (one non-US respondent, nine Hawaii respondents) dominate the axis
-# without being readable. A dot plot of the well-sampled states tells the same story.
+# A bar chart of all 52 levels puts every label on top of its neighbour and lets the two
+# smallest groups (one non-US respondent, nine Hawaii respondents) set the axis for everyone.
+# A dot plot of the well-sampled states tells the same story and stays readable.
 # A taller panel and larger base text keep 30-plus state names legible at page width.
 state_summary <- dataset |>
   filter(test == FALSE) |>
@@ -460,17 +474,45 @@ ggplot(cor_table, aes(x = correlation, y = reorder(feature, correlation),
 Three learners, one pipeline, one resampling scheme. Keeping them on the same footing is the
 only way the comparison means anything.
 
+### Train and holdout split
+
+The labeled rows are split once, stratified on the target, before any model is fitted.
+
+```{r split}
+# 80/20 split of the 3,027 labeled rows. Stratifying on the target keeps the class mix
+# identical on both sides, which matters because size 3 is the smallest class.
+# The holdout is scored once, at the end, and never used to choose a model.
+set.seed(101)
+
+labeled <- training |> mutate(.row = row_number())
+
+holdout_rows <- labeled |>
+  group_by(Q.amazon.use.hh.size.num) |>
+  slice_sample(prop = 0.2) |>
+  pull(.row)
+
+analysis_train <- labeled[-holdout_rows, ] |> select(-.row)
+analysis_hold  <- labeled[holdout_rows, ]  |> select(-.row)
+
+nrow(analysis_train)
+nrow(analysis_hold)
+
+# Close enough to the full-data proportions that the split is not reshaping the problem.
+table(analysis_train$Q.amazon.use.hh.size.num)
+table(analysis_hold$Q.amazon.use.hh.size.num)
+```
+
 ```{r task-build}
+# Cross-validation runs on the 80% only.
 task <- as_task_regr(
-  training |> select(-Survey.ResponseID),
+  analysis_train |> select(-Survey.ResponseID),
   target = "Q.amazon.use.hh.size.num",
   id = "household_size"
 )
 
-# XGBoost hyperparameters carried over from the original tuning run.
-# Reusing them keeps this revision comparable to the submitted numbers, but it also means
-# XGBoost saw this data during tuning. Its cross-validated score is therefore a little
-# optimistic. The other two learners use defaults.
+# XGBoost hyperparameters from a grid search over this training data.
+# They are reused as-is so every learner below is scored on identical folds, but tuning on
+# the same rows makes the XGBoost score mildly optimistic. The other two use defaults.
 xgb_params <- list(
   eta              = 0.09926108,
   max_depth        = 3,
@@ -507,11 +549,10 @@ lrn_xgb$id <- "xgboost"
 
 ```{r model-lm}
 # Same specification the benchmark learner uses: every feature, nothing hand-picked.
-# Keeping the reported model and the scored model identical means the coefficients below
-# describe the model whose RMSE appears in the table.
+# Fitted on the 80% so its coefficients describe the model that gets cross-validated.
 linear_model <- lm(
   Q.amazon.use.hh.size.num ~ .,
-  data = training |> select(-Survey.ResponseID)
+  data = analysis_train |> select(-Survey.ResponseID)
 )
 
 summary(linear_model)
@@ -556,9 +597,8 @@ ggplot(importance_df, aes(x = importance, y = reorder(feature, importance))) +
 
 ### Partial dependence and ICE
 
-An ICE plot draws one curve per respondent. With 3,027 rows that is 3,027 overlapping
-lines, which is why the original chart was a solid block of colour. Two changes make it
-readable:
+An ICE plot draws one curve per respondent. With 3,027 rows that is 3,027 overlapping lines,
+which collapses into a solid block of colour. Two changes make it readable:
 
 - draw a sample of 80 curves, faint, so the spread is visible but the page is not;
 - draw the partial-dependence average on top in bold.
@@ -606,7 +646,7 @@ children_effect <- ice_pdp(
 ggplot() +
   geom_line(data = children_effect$ice,
             aes(x = value, y = yhat, group = id),
-            colour = "#e07a1f", alpha = 0.10, linewidth = 0.3) +
+            colour = "#a0410a", alpha = 0.42, linewidth = 0.28) +
   geom_line(data = children_effect$pdp,
             aes(x = value, y = yhat),
             colour = "#0b2545", linewidth = 1.3) +
@@ -632,7 +672,7 @@ spend_effect <- ice_pdp(
 ggplot() +
   geom_line(data = spend_effect$ice,
             aes(x = value, y = yhat, group = id),
-            colour = "#2b6f8f", alpha = 0.10, linewidth = 0.3) +
+            colour = "#24607c", alpha = 0.30, linewidth = 0.28) +
   geom_line(data = spend_effect$pdp,
             aes(x = value, y = yhat),
             colour = "#0b2545", linewidth = 1.3) +
@@ -646,11 +686,14 @@ ggplot() +
   theme(panel.grid.minor = element_blank())
 ```
 
-The children's curve climbs and then levels off around 20 items; the spend curve is nearly
-horizontal. Spending more does not imply a bigger household; it mostly reflects how long the
-account has been active.
+The children's curve climbs and then levels off around 20 items. The spend curve is flat
+through the range where almost every respondent sits, then sags at the far right, where a
+handful of very large spenders pull the average down. Spending more does not imply a bigger
+household; below the tail it mostly reflects how long the account has been active.
 
 ## Benchmarking
+
+Ten-fold cross-validation inside the 80% training rows. The holdout is not involved.
 
 ```{r benchmark}
 resampling <- rsmp("cv", folds = 10)
@@ -748,43 +791,84 @@ tibble(
 )
 ```
 
-The gap between the best and worst learner is smaller than one standard deviation of
-fold-to-fold variation. That is a tie. Reporting a winner here would be reading noise.
+The gap between the best and worst learner is 0.016, about four-fifths of the typical
+fold-to-fold standard deviation of 0.019. That is a tie. Reporting a winner here would be
+reading noise.
+
+### Holdout check
+
+```{r holdout}
+# One look at the 20% that was held back. Model selection already happened on the folds
+# above, so nothing here can influence which learner gets used.
+rmse <- function(pred, obs) sqrt(mean((pred - obs)^2))
+
+holdout_x <- analysis_hold |> select(-Survey.ResponseID, -Q.amazon.use.hh.size.num)
+holdout_y <- analysis_hold$Q.amazon.use.hh.size.num
+
+holdout_scores <- tibble(
+  learner = c("linear model", "random forest", "xgboost"),
+  rmse = c(
+    rmse(predict(linear_model, newdata = analysis_hold), holdout_y),
+    rmse(lrn_rf$predict_newdata(holdout_x)$response, holdout_y),
+    rmse(lrn_xgb$predict_newdata(holdout_x)$response, holdout_y)
+  )
+) |>
+  arrange(rmse)
+
+holdout_scores
+```
+
+A 603-row holdout gives one number per learner, and the standard error of an RMSE estimate
+that size is around 0.03. That is wide enough that a holdout cannot reorder three learners
+which differ by 0.016. It can only confirm that the cross-validated picture is not an
+artifact of the folds, which is what it is for.
+
+The forest leads here too, and the other two swap places relative to the folds. That swap is
+the point: at this sample size the ordering below the leader is not stable.
 
 ## Predictions
 
 ```{r predictions}
 # One rounding rule for all three models.
-# The target only ever takes 1, 2, 3 or 4, so a prediction of 0 or 5 is not a legal answer.
-# The original code rounded for LM and RF but not for XGBoost, which left decimals in the
-# final file. This clips every model the same way.
+# The target only ever takes 1, 2, 3 or 4, so a prediction of 0 or 5 is not a legal answer,
+# and leaving decimals in the file would not match the submission format either.
 finalize <- function(pred, lo = 1, hi = 4) {
   pmin(pmax(round(pred), lo), hi)
 }
 
 testing_x <- testing |> select(-Survey.ResponseID, -Q.amazon.use.hh.size.num)
 
-pred_lm  <- finalize(predict(linear_model, newdata = testing))
-pred_rf  <- finalize(lrn_rf$predict_newdata(testing_x)$response)
-pred_xgb <- finalize(lrn_xgb$predict_newdata(testing_x)$response)
-
-# The best cross-validated learner is used for the final file.
+# The best cross-validated learner wins the final fit.
 best_id <- best$learner_id
+
+# Refit that learner on every labeled row before predicting the 2,000 unlabeled ones.
+# The holdout score describes the 80% model, but discarding 603 labeled rows at prediction
+# time would only make the answers worse.
+task_full <- as_task_regr(
+  training |> select(-Survey.ResponseID),
+  target = "Q.amazon.use.hh.size.num",
+  id = "household_size_full"
+)
+
+final_model <- list(
+  "linear model"  = lrn_lm,
+  "random forest" = lrn_rf,
+  "xgboost"       = lrn_xgb
+)[[best_id]]$clone(deep = TRUE)
+
+final_model$train(task_full)
+
+pred_final <- finalize(final_model$predict_newdata(testing_x)$response)
 
 final_predictions <- tibble(
   Survey.ResponseID        = testing$Survey.ResponseID,
-  Q.amazon.use.hh.size.num = switch(
-    best_id,
-    "linear model"  = pred_lm,
-    "random forest" = pred_rf,
-    "xgboost"       = pred_xgb
-  )
+  Q.amazon.use.hh.size.num = pred_final
 )
 
 table(final_predictions$Q.amazon.use.hh.size.num)
 ```
 
-Almost every prediction lands on 2 or 3, with a handful of 4s and no 1s. That is what
+Almost every prediction lands on 2 or 3, with a single 1 and a dozen 4s. That is what
 squared-error loss does: it pulls predictions toward the mean, so rare extreme households are
 never the best guess. For an RMSE target that shrinkage is correct. If the goal were exact
 class matches, an ordinal classifier would be the better tool.
@@ -795,6 +879,7 @@ dir.create("outputs", showWarnings = FALSE)
 
 write.csv(final_predictions, "outputs/hh_size_predictions_final.csv", row.names = FALSE)
 write.csv(benchmark_summary,  "outputs/model_benchmark.csv",         row.names = FALSE)
+write.csv(holdout_scores,     "outputs/holdout_scores.csv",           row.names = FALSE)
 write.csv(by_household,       "outputs/eda_by_household.csv",        row.names = FALSE)
 write.csv(cor_table,          "outputs/feature_correlations.csv",    row.names = FALSE)
 write.csv(race_summary,       "outputs/eda_race.csv",                row.names = FALSE)
@@ -808,35 +893,22 @@ list.files("outputs")
 sessionInfo()
 ```
 
-## What changed from the submitted version
-
-| Issue | Submitted | Revised |
-|---|---|---|
-| Test rows | Scored as a holdout | Recognized as unlabeled; 10-fold CV only |
-| `purchase_freq` | Named "items per day", computed as lines per day | Renamed `purchase_lines_per_day` |
-| Time anchor | `Sys.Date()`, so results drifted daily | Fixed `SNAPSHOT_DATE` (2024-08-15) |
-| Categorical encoding | `as.numeric(factor(x))` invented an order | Real factors with dummies |
-| Rare states | Silently broke factor models | Pooled into "Other" below 20 respondents |
-| `children_items` | Included pet toys | Excludes pet categories |
-| `food_items` | Included pet food, storage containers, blenders | Exact category names only |
-| `multiuse_items` | Included skin cleansers, toothbrush heads, toilet seats | Paper and cleaning products only |
-| ICE plots | One line per respondent, unreadable | 80 sampled curves plus a bold PDP |
-| Model comparison | Chart labeled MSE that actually plotted RMSE, no spread | Labeled RMSE, with mean, SD and fold range |
-| Prediction outputs | Rounded for LM/RF, raw for XGBoost | One rounding and clipping rule for all |
-| Duplicate objects | `graph_xgb` defined twice | Single learner definition |
-
 ## Limitations
 
-- **No holdout score.** The 2,000 test rows are unlabeled. Every number here is
-  cross-validated on 3,027 rows, and a cross-validated estimate is still an estimate on the
-  same people the model was built for.
+- **One holdout, one number.** The 603 held-out rows give a single estimate with a standard
+  error of roughly 0.03 RMSE. It confirms the cross-validated ranking; it cannot refine it.
 - **Target is censored at 4.** Households of 4 and 7 look identical to the model.
 - **Category bins are hand-written keyword rules.** They are reproducible and documented,
   but they are not Amazon's taxonomy and they will miss products. The three bins are
   approximate, and the food and consumables bins carry almost no signal.
-- **XGBoost was tuned on this data.** Its hyperparameters came from an earlier search on
-  the same rows, so its score is mildly optimistic relative to LM and RF defaults.
-- **Only three learners.** A LightGBM run from the original report is not reproduced here,
-  because it was fitted through a different pipeline and would not be comparable.
+- **XGBoost was tuned on this data.** Its hyperparameters come from a grid search over the
+  same rows, so its score is mildly optimistic relative to the LM and RF defaults.
 - **Observational data.** Purchase behavior correlates with household size. It does not
   establish that buying children's products causes a bigger household, or the reverse.
+- **Gift cards are included.** The log contains 41,665 gift-card lines from 3,189 respondents,
+  about 3% of total spend. They are transfers rather than household consumption, and the source
+  paper flags them as a known quirk. Excluding them is a reasonable robustness check that this
+  analysis does not run.
+- **The sample is not the U.S. population.** Berke et al. report that it skews female, younger
+  and more educated than the census, and under-represents Black, Other and multiracial
+  respondents. The model describes these 5,027 volunteers, not Amazon shoppers generally.

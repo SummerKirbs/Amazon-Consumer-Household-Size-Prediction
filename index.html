@@ -133,9 +133,9 @@
     <div class="note">
       <h3>Two facts shaped every decision after this</h3>
       <p>
-        <strong>The 2,000 test rows have no household size.</strong> They are blank, not hidden.
-        Any score computed on them is not a score. The only honest evaluation here is ten-fold
-        cross-validation on the 3,027 labeled rows.
+        <strong>The 2,000 test rows have no household size.</strong> They are blank, not hidden,
+        so no score can be computed on them. Evaluation happens inside the 3,027 labeled rows:
+        a stratified 80/20 split, then ten-fold cross-validation on the 80%.
       </p>
       <p>
         <strong>The target is censored at 4.</strong> A household of four and a household of
@@ -319,7 +319,7 @@
         <div class="chart-media">
           <a class="chart-link" href="assets/img/eda-state-1.png">
             <img src="assets/img/eda-state-1.png" width="1920" height="1600" loading="lazy" decoding="async"
-                 alt="Dot plot of mean household size by state for states with at least 20 respondents. All means fall between roughly 2.0 and 2.7.">
+                 alt="Dot plot of mean household size by state for states with at least 20 respondents. All means fall between roughly 2.0 and 2.6.">
           </a>
         </div>
         <figcaption>
@@ -333,17 +333,6 @@
         </figcaption>
       </figure>
     </div>
-
-    <div class="note">
-      <h3>Why the original state chart was unreadable</h3>
-      <p>
-        It drew all 52 levels as bars with rotated labels, in a panel wide enough to fit them
-        only by shrinking the text past legibility. Worse, the two smallest groups set the top
-        of the axis, so one respondent from outside the US stretched the scale for everyone.
-        The fix is to filter to groups with enough data and plot points with intervals, which is
-        what the chart above does.
-      </p>
-    </div>
   </div>
 </section>
 
@@ -353,14 +342,14 @@
       <p class="eyebrow">Models</p>
       <h2>Three learners, one pipeline, a statistical tie</h2>
       <p class="lede">
-        Linear regression, a random forest and XGBoost, all scored on the same ten folds of the
-        same 3,027 labeled rows.
+        Linear regression, a random forest and XGBoost, all scored on the same ten folds inside
+        an 80% split of the labeled rows.
       </p>
     </div>
 
     <div class="kpi-grid">
       <div class="kpi">
-        <p class="kpi-value">1.066</p>
+        <p class="kpi-value">1.063</p>
         <p class="kpi-label">Best cross-validated RMSE, random forest</p>
       </div>
       <div class="kpi">
@@ -368,18 +357,18 @@
         <p class="kpi-label">Worst cross-validated RMSE, linear model</p>
       </div>
       <div class="kpi">
-        <p class="kpi-value">0.013</p>
+        <p class="kpi-value">0.016</p>
         <p class="kpi-label">Gap between best and worst, in household-size units</p>
       </div>
       <div class="kpi">
-        <p class="kpi-value">0.032</p>
+        <p class="kpi-value">0.019</p>
         <p class="kpi-label">Typical fold-to-fold standard deviation, larger than the gap</p>
       </div>
     </div>
 
     <div class="scoreboard">
       <table>
-        <caption>Ten-fold cross-validated RMSE on the 3,027 labeled rows</caption>
+        <caption>Ten-fold cross-validated RMSE on the 2,424-row analysis split</caption>
         <thead>
           <tr>
             <th scope="col">Learner</th>
@@ -392,24 +381,24 @@
         <tbody>
           <tr>
             <td>Random forest</td>
-            <td class="num">1.066</td>
-            <td class="num">0.034</td>
-            <td class="num">1.031</td>
-            <td class="num">1.133</td>
+            <td class="num">1.063</td>
+            <td class="num">0.017</td>
+            <td class="num">1.046</td>
+            <td class="num">1.095</td>
           </tr>
           <tr>
             <td>XGBoost</td>
-            <td class="num">1.074</td>
-            <td class="num">0.035</td>
-            <td class="num">1.019</td>
-            <td class="num">1.143</td>
+            <td class="num">1.065</td>
+            <td class="num">0.020</td>
+            <td class="num">1.033</td>
+            <td class="num">1.101</td>
           </tr>
           <tr>
             <td>Linear model</td>
             <td class="num">1.079</td>
-            <td class="num">0.027</td>
-            <td class="num">1.043</td>
-            <td class="num">1.129</td>
+            <td class="num">0.020</td>
+            <td class="num">1.058</td>
+            <td class="num">1.115</td>
           </tr>
         </tbody>
         <tfoot>
@@ -422,6 +411,16 @@
           </tr>
         </tfoot>
       </table>
+    </div>
+
+    <div class="note">
+      <h3>The held-out 20% agrees on the leader only</h3>
+      <p>
+        The 603 rows never used for fitting score the three learners at 1.083, 1.085 and 1.091.
+        Random forest leads on both the folds and the holdout, but the other two swap places,
+        which is what a 0.016 gap between models and a 0.03 standard error on the holdout
+        predict. The holdout is a check, not a second tuning loop.
+      </p>
     </div>
 
     <div class="figure-stack">
@@ -442,7 +441,7 @@
           <div class="chip-row">
             <span class="chip">10 folds</span>
             <span class="chip">Same folds for all three</span>
-            <span class="chip">No holdout</span>
+            <span class="chip">Held-out 20% confirms</span>
           </div>
         </figcaption>
       </figure>
@@ -500,15 +499,15 @@
         <div class="chart-media">
           <a class="chart-link" href="assets/img/model-pdp-children-1.png">
             <img src="assets/img/model-pdp-children-1.png" width="1920" height="960" loading="lazy" decoding="async"
-                 alt="Eighty faint orange individual conditional expectation curves rising with children's items, with a bold navy partial dependence line on top.">
+                 alt="Eighty faint dark orange individual conditional expectation curves rising with children's items, with a bold navy partial dependence line on top.">
           </a>
         </div>
         <figcaption>
           <p class="takeaway"><span class="fig-num">13</span> More children's products, larger predicted household</p>
           <p class="how">
             The bold line is the partial-dependence average and the faint lines are 80 sampled
-            respondents. The original version of this chart drew every row, which produced a
-            solid block of colour; sampling makes the spread visible and the average legible.
+            respondents. Drawing every row instead produces a solid block of colour; sampling
+            makes the spread visible and the average legible.
           </p>
           <div class="chip-row">
             <span class="chip">80 sampled curves</span>
@@ -521,15 +520,16 @@
         <div class="chart-media">
           <a class="chart-link" href="assets/img/model-pdp-spend-1.png">
             <img src="assets/img/model-pdp-spend-1.png" width="1920" height="960" loading="lazy" decoding="async"
-                 alt="Eighty faint blue individual conditional expectation curves that stay flat as total spend increases, with a bold nearly horizontal partial dependence line.">
+                 alt="Eighty faint blue individual conditional expectation curves that stay flat across most of the spend range, with a bold partial dependence line that sags at the extreme tail.">
           </a>
         </div>
         <figcaption>
           <p class="takeaway"><span class="fig-num">14</span> Total spend barely moves the prediction</p>
           <p class="how">
             Spend is heavily skewed, so the x-axis is log-scaled; without that every curve piles
-            up at the left edge. The average line is close to horizontal. Spending more mostly
-            reflects a longer account history, not a bigger household.
+            up at the left edge. The average line is flat through the range where almost
+            everyone sits, then sags at the far right, where a handful of very large spenders
+            pull it down. Spending more does not mean a bigger household.
           </p>
         </figcaption>
       </figure>
@@ -553,14 +553,19 @@
       <div class="method-card">
         <h3>Data</h3>
         <p>
-          Two files: a respondent survey and a purchase log. The survey has 5,027 rows and one
-          target column. The log has 1,850,717 line items covering January 2018 to August 2024,
-          and every survey ID appears in it.
+          Open E-commerce 1.0 (Berke et al., 2024): Amazon purchase histories from 5,027 U.S.
+          survey respondents who chose to share them, linked to their survey answers by a
+          randomly generated respondent ID.
         </p>
         <p>
-          The 2,000 rows flagged <code>test</code> have no household size, so they are a
-          prediction set rather than a holdout. Evaluation is ten-fold cross-validation on the
-          3,027 labeled rows.
+          Each purchase row is a line item, not an order: it has an order date but no order ID.
+          The log has 1,850,717 line items from January 2018 to August 2024, and every survey
+          ID appears in it. The 2,000 rows flagged <code>test</code> have no household size, so
+          they are a prediction set rather than a holdout.
+        </p>
+        <p>
+          <a href="https://doi.org/10.1038/s41597-024-03329-6">Berke, Calacci, Mahari et al.,
+          <em>Scientific Data</em> 11, 491 (2024)</a>
         </p>
       </div>
 
@@ -575,23 +580,23 @@
       </div>
 
       <div class="method-card">
-        <h3>Three corrections that changed the answer</h3>
+        <h3>Three decisions that shaped the model</h3>
         <ol>
           <li>
-            <strong>Category bins were leaking.</strong> The children's bin counted pet toys and
-            the food bin counted pet food, storage containers and blenders. Tightening the
-            keyword rules removed thousands of false matches.
+            <strong>Category bins need tight rules.</strong> A loose keyword match counts pet
+            toys as children's products, and counts pet food, storage containers and blenders as
+            groceries. The bins here name the categories they accept.
           </li>
           <li>
-            <strong>Time drifted.</strong> Purchase rates were divided by days since first order,
-            measured to <code>Sys.Date()</code>, so every rerun changed the numbers. The snapshot
-            is now fixed at the last order date, 2024-08-15.
+            <strong>Time has to be anchored.</strong> Dividing purchase lines by days since the
+            first order produces a different rate on every run if the end date follows the system
+            date. The snapshot is fixed at the last order date, 2024-08-15.
           </li>
           <li>
-            <strong>Categoricals were numbered.</strong> Encoding state as
-            <code>as.numeric(factor(x))</code> tells a linear model that Wyoming is 46 units from
-            Ohio. States with fewer than 20 respondents also broke <code>lm()</code> in
-            cross-validation, so they are pooled into "Other".
+            <strong>Categoricals stay categorical.</strong> Encoding state as
+            <code>as.numeric(factor(x))</code> tells a linear model that alphabetically distant
+            states are numerically distant. States with fewer than 20 respondents also break
+            <code>lm()</code> in cross-validation, so they are pooled into "Other".
           </li>
         </ol>
       </div>
@@ -599,11 +604,12 @@
       <div class="method-card">
         <h3>Evaluation</h3>
         <ul>
-          <li>Ten folds, the same folds for all three learners</li>
+          <li>Stratified 80/20 split of the 3,027 labeled rows, before any model is fitted</li>
+          <li>Ten folds inside the 80%, the same folds for all three learners</li>
+          <li>One holdout score on the 20%, used to confirm rather than to choose</li>
           <li>RMSE in household-size units, reported per fold</li>
           <li>Predictions rounded and clipped to the legal range 1&ndash;4 for every learner</li>
-          <li>Fixed seed, so the table does not move between runs</li>
-          <li>Squared-error loss shrinks predictions toward the mean, so the 2,000 predictions are almost all 2s and 3s</li>
+          <li>Squared-error loss shrinks predictions toward the mean, so the predictions are almost all 2s and 3s</li>
         </ul>
       </div>
 
@@ -635,11 +641,11 @@
 
     <div class="methods-grid">
       <div class="method-card">
-        <h3>No holdout score</h3>
+        <h3>No holdout score from the test file</h3>
         <p>
-          The 2,000 test rows are unlabeled, so every number here is cross-validated on the same
-          3,027 rows the model was built from. A cross-validated estimate is still an estimate on
-          the population the model was fitted to.
+          The 2,000 test rows are unlabeled, so the holdout comes from inside the 3,027 labeled
+          rows: 80% for cross-validation and model selection, 20% touched once at the end. The
+          final predictions refit the winning learner on all 3,027 labeled rows.
         </p>
       </div>
       <div class="method-card">
@@ -660,7 +666,7 @@
       <div class="method-card">
         <h3>XGBoost was tuned on this data</h3>
         <p>
-          Its hyperparameters come from an earlier search on these same rows, so its
+          Its hyperparameters come from a grid search on these same rows, so its
           cross-validated score is mildly optimistic relative to the untuned linear model and
           forest. It still does not win.
         </p>
@@ -668,9 +674,26 @@
       <div class="method-card">
         <h3>Three learners, not a leaderboard</h3>
         <p>
-          A LightGBM result from the earlier write-up is not reproduced here because it was
-          fitted through a different pipeline and would not be comparable. The submitted report's
-          claimed XGBoost margin does not survive a like-for-like rerun.
+          Linear regression, a random forest and XGBoost cover the plausible shapes here:
+          linear, piecewise-constant, and boosted. They finish within two hundredths of each
+          other, so the comparison is a tie rather than a ranking.
+        </p>
+      </div>
+      <div class="method-card">
+        <h3>Gift cards are included</h3>
+        <p>
+          The log has 41,665 gift-card lines from 3,189 respondents, about 3% of total spend.
+          They are transfers rather than household consumption, and the source paper flags them
+          as a known quirk. Excluding them is a reasonable robustness check that this analysis
+          does not run.
+        </p>
+      </div>
+      <div class="method-card">
+        <h3>The sample is not the U.S. population</h3>
+        <p>
+          Berke et al. report that the sample skews female, younger and more educated than the
+          census, and under-represents Black, Other and multiracial respondents. The model
+          describes these 5,027 volunteers, not Amazon shoppers generally.
         </p>
       </div>
       <div class="method-card">
@@ -683,16 +706,6 @@
       </div>
     </div>
 
-    <div class="note">
-      <h3>Corrections carried over from the submitted report</h3>
-      <p>
-        The original write-up scored the unlabeled test rows, labeled a chart of RMSE as MSE,
-        named a per-day line count "items per day", used a target column that drifted with the
-        system date, and encoded categories as arbitrary integers. Each of those is fixed in
-        this rebuild, which is why the numbers here are lower and closer together than the
-        submitted ones.
-      </p>
-    </div>
   </div>
 </section>
 

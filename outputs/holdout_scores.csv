@@ -1,0 +1,4 @@
+"learner","rmse"
+"random forest",1.08349632200731
+"linear model",1.08467900584543
+"xgboost",1.09058151133018
