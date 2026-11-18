@@ -64,10 +64,15 @@ The held-out 20% agrees on the leader and refuses to order the rest:
 
 ## Data
 
-The data is Open E-commerce 1.0 (Berke et al., 2024): Amazon purchase histories from 5,027 U.S.
-survey respondents who chose to share them, linked to their survey answers by a randomly
-generated respondent ID. The dataset is published on Harvard Dataverse and described in
-*Scientific Data*: <https://doi.org/10.1038/s41597-024-03329-6>.
+The data is Open E-commerce 1.0, published by Berke et al. in *Scientific Data* (2024). It
+contains the Amazon purchase histories of 5,027 U.S. survey respondents who agreed to share
+them, exported from Amazon's order-history reports and linked to their survey answers by a
+randomly generated respondent ID. Collection ran from November 2022 to March 2023 and covers
+purchases back to January 2018.
+
+> Berke, A., Calacci, D., Mahari, R., Yabe, T., Larson, K., & Pentland, S. (2024). Open
+> e-commerce 1.0, five years of crowdsourced U.S. Amazon purchase histories with user
+> demographics. *Scientific Data*, 11, 491. <https://doi.org/10.1038/s41597-024-03329-6>
 
 | File | Rows | Columns | Contents |
 |---|---|---|---|
