@@ -1,6 +1,6 @@
 ---
 title: "Amazon Consumer Household Size Prediction"
-subtitle: "STATS 101C final project"
+subtitle: "A regression study of purchase behavior"
 output:
   html_document:
     toc: true
