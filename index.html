@@ -574,12 +574,32 @@
       </div>
 
       <div class="method-card">
-        <h3>Features</h3>
+        <h3>Feature engineering</h3>
+        <p>
+          1,850,717 purchase lines collapse to one row per respondent. Every feature below
+          summarizes that person's whole history.
+        </p>
         <ul>
-          <li>Purchase lines rolled up to one row per respondent</li>
-          <li>Volume: lines per day, total spend, total items, average line value and quantity</li>
-          <li>Three keyword bins: children's products, food and grocery, shared consumables</li>
-          <li>Demographics: gender and state as real factors, not numeric codes</li>
+          <li><strong><code>children_items</code></strong> &mdash; lines in baby, child or toy categories, excluding pet categories</li>
+          <li><strong><code>food_items</code></strong> &mdash; lines in the 19 exact food and grocery categories</li>
+          <li><strong><code>multiuse_items</code></strong> &mdash; toilet paper, paper towels, detergent, wipes, facial tissue and tooth care only</li>
+          <li><strong><code>total_spend</code></strong> and <strong><code>total_items</code></strong> &mdash; sum of line value and sum of quantity</li>
+          <li><strong><code>avg_line_value</code></strong> and <strong><code>avg_line_quantity</code></strong> &mdash; means over purchase lines</li>
+          <li><strong><code>purchase_lines_per_day</code></strong> &mdash; line count divided by days from the first order to 2024-08-15</li>
+          <li><strong><code>gender</code></strong> and <strong><code>state</code></strong> &mdash; real factors; states under 20 labeled respondents pooled into "Other"</li>
+        </ul>
+        <p>
+          The three category bins are hand-written keyword rules, not Amazon's taxonomy.
+        </p>
+      </div>
+
+      <div class="method-card">
+        <h3>Models</h3>
+        <ul>
+          <li><strong>Linear regression</strong> on every feature, reported for interpretation as much as prediction</li>
+          <li><strong>Random forest</strong> (<code>ranger</code>) with median imputation</li>
+          <li><strong>XGBoost</strong> with one-hot encoding and fixed hyperparameters from a grid search</li>
+          <li>All three scored on identical folds, so the comparison is like for like</li>
         </ul>
       </div>
 
@@ -614,6 +634,19 @@
           <li>RMSE in household-size units, reported per fold</li>
           <li>Predictions rounded and clipped to the legal range 1&ndash;4 for every learner</li>
           <li>Squared-error loss shrinks predictions toward the mean, so the predictions are almost all 2s and 3s</li>
+        </ul>
+      </div>
+
+      <div class="method-card">
+        <h3>Tech stack</h3>
+        <ul>
+          <li><strong>Language:</strong> R 4.4</li>
+          <li><strong>Data handling:</strong> tidyverse &mdash; <code>dplyr</code>, <code>tidyr</code>, <code>stringr</code>, <code>purrr</code></li>
+          <li><strong>Modeling:</strong> mlr3, mlr3pipelines, ranger, <code>lm</code>, xgboost</li>
+          <li><strong>Visualization:</strong> ggplot2, scales</li>
+          <li><strong>Reporting:</strong> knitr, R Markdown</li>
+          <li><strong>Site:</strong> HTML, CSS, GitHub Pages, <code>.nojekyll</code></li>
+          <li><strong>License:</strong> Apache 2.0</li>
         </ul>
       </div>
 

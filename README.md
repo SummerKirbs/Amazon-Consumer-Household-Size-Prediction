@@ -62,6 +62,24 @@ The held-out 20% agrees on the leader and refuses to order the rest:
 | Linear model | 1.085 |
 | XGBoost | 1.091 |
 
+## Features
+
+- **Children's products carry the signal.** Mean lines rise 3.6 → 5.9 → 10.6 → 15.5 from household size 1 to 4, the strongest correlation in the data at r = 0.228.
+- **Almost everything else is flat.** Food and grocery, shared consumables, average line value near $26, and the basket near $53 barely move with household size.
+- **One protocol for three learners.** A stratified 80/20 split, ten-fold cross-validation inside the 80%, one holdout score, then a refit on every labeled row.
+- **Honest uncertainty.** Every score ships with fold spread and a held-out check, so a 0.016 gap is not sold as a win.
+- **Reproducible figures.** Every chart and table on the dashboard is written by `R/render.R` from `model.md`.
+
+## Tech Stack
+
+- **Language:** R 4.4
+- **Data handling:** tidyverse (`dplyr`, `tidyr`, `stringr`, `purrr`)
+- **Modeling:** mlr3, mlr3pipelines, ranger, base `lm`, xgboost
+- **Visualization:** ggplot2, scales
+- **Reporting:** knitr, R Markdown
+- **Site:** HTML, CSS, GitHub Pages, `.nojekyll`
+- **License:** Apache 2.0
+
 ## Data
 
 The data is Open E-commerce 1.0, published by Berke et al. in *Scientific Data* (2024). It
@@ -92,6 +110,43 @@ are a prediction set, not a holdout, so no score is computed on them. Evaluation
 inside the 3,027 labeled rows.
 
 Neither source file is redistributed. Put both CSV files in `DATA/` to rebuild.
+
+## Methodology
+
+### Feature engineering
+
+Purchase lines are rolled up to one row per respondent: 1,850,717 lines become 5,027 rows.
+Every feature is a summary of that person's entire history.
+
+- **`children_items`** — lines in baby, child or toy categories, excluding pet categories.
+- **`food_items`** — lines in the 19 exact food and grocery categories (`FOOD`, `GROCERY`,
+  `MEAT`, `POULTRY`, `VEGETABLE`, `FRUIT`, `BEVERAGE`, and 12 more).
+- **`multiuse_items`** — toilet paper, paper towels, laundry and dishwasher detergent, cleaning
+  agents, wipes, facial tissue and tooth care only.
+- **`total_spend`** — sum of unit price × quantity. **`total_items`** — sum of quantity.
+- **`avg_line_value`**, **`avg_line_quantity`** — means over purchase lines.
+- **`purchase_lines_per_day`** — line count divided by days from the first order to the
+  2024-08-15 snapshot.
+- **`gender`**, **`state`** — real factors. States with fewer than 20 labeled respondents are
+  pooled into "Other", because a single-respondent state lands in one CV fold and breaks `lm()`
+  in the other nine.
+
+The three category bins are hand-written keyword rules, not Amazon's taxonomy.
+
+### Models
+
+- **Linear regression** on every feature, reported for interpretation as much as prediction.
+- **Random forest** (`ranger`) with median imputation.
+- **XGBoost** with one-hot encoding and fixed hyperparameters from a grid search.
+- All three are scored on identical folds, so the comparison is like for like.
+
+### Evaluation
+
+The 3,027 labeled rows are split once, stratified on the target: 2,424 to fit and compare, 603
+held back. Ten-fold cross-validation runs inside the 80%, every learner gets the same folds, and
+the metric is RMSE in household-size units. The holdout is scored once at the end and never used
+to choose a model. The winning learner is then refit on all 3,027 labeled rows for the 2,000
+predictions, which are rounded and clipped to the legal range 1–4.
 
 ## Repository layout
 
