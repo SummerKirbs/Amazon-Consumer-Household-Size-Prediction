@@ -1,0 +1,19 @@
+# Source data is large and not redistributed.
+DATA/
+
+# R session leftovers
+.RData
+.Rhistory
+.Rproj.user/
+.RdataTmp*
+
+# Rendered artefacts that are rebuilt on demand
+model.html
+model.knit.md
+model_files/
+*.knit.md
+
+# OS noise
+.DS_Store
+Thumbs.db
+desktop.ini

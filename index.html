@@ -1,0 +1,711 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Amazon Consumer Household Size Prediction</title>
+<meta name="description" content="Can purchase behavior predict household size better than demographics? A regression study on 3,027 labeled respondents and 1.85 million purchase lines.">
+<meta name="theme-color" content="#0b2545">
+<meta property="og:title" content="Amazon Consumer Household Size Prediction">
+<meta property="og:description" content="Purchase volume and children's products carry the signal. Demographics barely move it.">
+<meta property="og:type" content="article">
+<link rel="stylesheet" href="assets/css/style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='22' fill='%230b2545'/><text x='50' y='72' font-size='58' font-family='system-ui,sans-serif' font-weight='700' fill='%23e07a1f' text-anchor='middle'>H</text></svg>">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+
+<header class="site-header">
+  <div class="wrap header-inner">
+    <a class="brand" href="#top">
+      <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M4 12.5 16 5l12 7.5V27H4z"/>
+        <path d="M12 27v-8h8v8"/>
+      </svg>
+      <span>
+        Household Size
+        <small>STATS 101C &middot; Regression</small>
+      </span>
+    </a>
+    <nav aria-label="Sections">
+      <a href="#question">Question</a>
+      <a href="#behavior">Behavior</a>
+      <a href="#demographics">Demographics</a>
+      <a href="#models">Models</a>
+      <a href="#methods">Methods</a>
+      <a href="#limits">Limits</a>
+      <a class="nav-code" href="https://github.com/summerkirbs/Amazon-Consumer-Household-Size-Prediction/blob/main/model.md">Full analysis</a>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+
+<section class="hero" id="top">
+  <div class="wrap hero-grid">
+    <div>
+      <p class="eyebrow eyebrow-light">STATS 101C &middot; Final regression project &middot; Fall 2025</p>
+      <h1>What you buy says more than who you are</h1>
+      <p class="lede">
+        The survey asks each respondent how many people live in their household. The purchase
+        log records what that same account bought, when, and for how much. Purchase behavior
+        predicts household size; demographics barely move the prediction.
+      </p>
+      <div class="hero-actions">
+        <a class="btn btn-primary" href="#models">See the model results</a>
+        <a class="btn btn-ghost" href="https://github.com/summerkirbs/Amazon-Consumer-Household-Size-Prediction/blob/main/model.md">Read the full analysis</a>
+      </div>
+    </div>
+
+    <aside class="hero-card">
+      <p class="hero-card-label">The one signal that matters</p>
+      <p class="hero-stat">
+        <span>3.6</span>
+        <span class="hero-arrow" aria-hidden="true">&rarr;</span>
+        <span>15.5</span>
+      </p>
+      <p class="hero-card-copy">
+        Mean children's-product lines for a one-person household versus a household of four.
+        Every other purchase measure moves by a fraction of that.
+      </p>
+      <div class="hero-mini">
+        <div><strong>3,027</strong><span>labeled respondents</span></div>
+        <div><strong>1.85M</strong><span>purchase lines</span></div>
+        <div><strong>10-fold</strong><span>cross-validation</span></div>
+        <div><strong>0.228</strong><span>correlation, children's items</span></div>
+      </div>
+      <p class="hero-foot">All figures regenerate from <code>R/render.R</code>. No respondent-level data is published.</p>
+    </aside>
+  </div>
+</section>
+
+<section class="chapter" id="question">
+  <div class="wrap">
+    <div class="chapter-head">
+      <p class="eyebrow">Question and data</p>
+      <h2>Five thousand respondents, one capped target</h2>
+      <p class="lede">
+        The survey and the purchase log are joined on a single respondent ID. The target is
+        self-reported household size, which the survey caps at "4 or more".
+      </p>
+    </div>
+
+    <div class="kpi-grid">
+      <div class="kpi">
+        <p class="kpi-value">5,027</p>
+        <p class="kpi-label">Survey respondents, each already matched to a purchase history</p>
+      </div>
+      <div class="kpi">
+        <p class="kpi-value">3,027</p>
+        <p class="kpi-label">Rows with a household size. These are the only rows that can be scored.</p>
+      </div>
+      <div class="kpi">
+        <p class="kpi-value">2,000</p>
+        <p class="kpi-label">Rows with no household size. A prediction set, not a holdout.</p>
+      </div>
+      <div class="kpi">
+        <p class="kpi-value">2.44</p>
+        <p class="kpi-label">Mean household size across the labeled rows</p>
+      </div>
+    </div>
+
+    <figure class="chart-card">
+      <div class="chart-media">
+        <a class="chart-link" href="assets/img/eda-household-counts-1.png">
+          <img src="assets/img/eda-household-counts-1.png" width="1920" height="960" loading="lazy" decoding="async"
+               alt="Bar chart of labeled respondents by household size: 733 one-person, 957 two-person, 613 three-person and 724 four-or-more households.">
+        </a>
+      </div>
+      <figcaption>
+        <p class="takeaway"><span class="fig-num">01</span> The four classes are close enough that a regression is a fair fit</p>
+        <p class="how">
+          Households are grouped 733 / 957 / 613 / 724 across sizes 1 to 4. No class is rare
+          enough to distort a cross-validated score, and no class is large enough to make a
+          constant prediction look good.
+        </p>
+        <div class="chip-row">
+          <span class="chip">3,027 labeled rows</span>
+          <span class="chip">Target range 1&ndash;4</span>
+        </div>
+      </figcaption>
+    </figure>
+
+    <div class="note">
+      <h3>Two facts shaped every decision after this</h3>
+      <p>
+        <strong>The 2,000 test rows have no household size.</strong> They are blank, not hidden.
+        Any score computed on them is not a score. The only honest evaluation here is ten-fold
+        cross-validation on the 3,027 labeled rows.
+      </p>
+      <p>
+        <strong>The target is censored at 4.</strong> A household of four and a household of
+        seven look identical to the model, so a perfect prediction is impossible and an RMSE
+        near 1 is expected rather than disappointing.
+      </p>
+    </div>
+  </div>
+</section>
+
+<section class="chapter chapter--tint" id="behavior">
+  <div class="wrap">
+    <div class="chapter-head">
+      <p class="eyebrow">Purchase behavior</p>
+      <h2>One category separates households, the rest barely move</h2>
+      <p class="lede">
+        Every feature is a summary of a respondent's whole purchase history between January 2018
+        and August 2024, not a single order.
+      </p>
+    </div>
+
+    <div class="figure-stack">
+      <figure class="chart-card">
+        <div class="chart-media">
+          <a class="chart-link" href="assets/img/eda-children-items-1.png">
+            <img src="assets/img/eda-children-items-1.png" width="1920" height="960" loading="lazy" decoding="async"
+                 alt="Bar chart: mean children's-product lines rise from 3.6 for one-person households to 15.5 for households of four or more.">
+          </a>
+        </div>
+        <figcaption>
+          <p class="takeaway"><span class="fig-num">02</span> Children's products climb almost five-fold from size 1 to size 4</p>
+          <p class="how">
+            Mean lines of baby, child and toy products rise 3.6 &rarr; 5.9 &rarr; 10.6 &rarr; 15.5.
+            Pet categories are excluded from the bin, so the pattern is not a pet-owner
+            artifact. This is the strongest relationship in the dataset at
+            <strong>r = 0.228</strong>.
+          </p>
+          <div class="chip-row">
+            <span class="chip">Baby, child, toy</span>
+            <span class="chip">Pet categories excluded</span>
+            <span class="chip">r = 0.228</span>
+          </div>
+        </figcaption>
+      </figure>
+
+      <figure class="chart-card">
+        <div class="chart-media">
+          <a class="chart-link" href="assets/img/eda-category-groups-1.png">
+            <img src="assets/img/eda-category-groups-1.png" width="1920" height="960" loading="lazy" decoding="async"
+                 alt="Three small-multiple bar charts comparing children's products, food and grocery, and shared consumables by household size. Only children's products trend upward.">
+          </a>
+        </div>
+        <figcaption>
+          <p class="takeaway"><span class="fig-num">03</span> Food and shared consumables are flat</p>
+          <p class="how">
+            Food and grocery averages sit between 20.6 and 22.6 lines with no order to them
+            (r = &minus;0.003). Shared consumables, the paper towels and detergent a bigger
+            household should burn through faster, only reach r = 0.035. The obvious hypotheses
+            do not survive the data.
+          </p>
+          <div class="chip-row">
+            <span class="chip">Food r = &minus;0.003</span>
+            <span class="chip">Shared consumables r = 0.035</span>
+          </div>
+        </figcaption>
+      </figure>
+
+      <figure class="chart-card">
+        <div class="chart-media">
+          <a class="chart-link" href="assets/img/eda-correlation-1.png">
+            <img src="assets/img/eda-correlation-1.png" width="1920" height="960" loading="lazy" decoding="async"
+                 alt="Horizontal bar chart of correlations with household size: children's items 0.228, purchase lines per day 0.103, total spend 0.104, total items 0.098, shared consumables 0.035, average line value 0.005, food -0.003.">
+          </a>
+        </div>
+        <figcaption>
+          <p class="takeaway"><span class="fig-num">04</span> Volume signals are real but weak; price signals are noise</p>
+          <p class="how">
+            Lines per day, total spend and total items all land near r = 0.10. Spending more per
+            line is unrelated to household size (r = 0.005), which is why a value-based model
+            cannot work here.
+          </p>
+          <div class="chip-row">
+            <span class="chip">Volume, not price</span>
+            <span class="chip">All r below 0.11 except children</span>
+          </div>
+        </figcaption>
+      </figure>
+    </div>
+
+    <div class="figure-stack figure-stack--split">
+      <figure class="chart-card">
+        <div class="chart-media">
+          <a class="chart-link" href="assets/img/eda-purchase-volume-1.png">
+            <img src="assets/img/eda-purchase-volume-1.png" width="1920" height="960" loading="lazy" decoding="async"
+                 alt="Bar chart: mean total items purchased rises from 324 for one-person households to 472 for households of four or more.">
+          </a>
+        </div>
+        <figcaption>
+          <p class="takeaway"><span class="fig-num">05</span> Total items rise, but gently</p>
+          <p class="how">
+            Mean items bought run 324 &rarr; 412 &rarr; 393 &rarr; 472. The three-person dip is
+            noise, and the whole range is small next to the 4.3-fold jump in children's
+            products. Buying more is a weak signal on its own.
+          </p>
+        </figcaption>
+      </figure>
+
+      <figure class="chart-card">
+        <div class="chart-media">
+          <a class="chart-link" href="assets/img/eda-rate-1.png">
+            <img src="assets/img/eda-rate-1.png" width="1920" height="960" loading="lazy" decoding="async"
+                 alt="Bar chart: purchase lines per day rise from 0.128 for one-person households to 0.187 for households of four or more.">
+          </a>
+        </div>
+        <figcaption>
+          <p class="takeaway"><span class="fig-num">06</span> Bigger households order a bit more often</p>
+          <p class="how">
+            Lines per day rise from 0.128 to 0.187, a 46% increase against a 4.3-fold increase
+            in children's products. Ordering frequency is a secondary signal, not the story.
+          </p>
+        </figcaption>
+      </figure>
+    </div>
+
+    <div class="figure-stack">
+      <figure class="chart-card">
+        <div class="chart-media">
+          <a class="chart-link" href="assets/img/eda-spend-flat-1.png">
+            <img src="assets/img/eda-spend-flat-1.png" width="1920" height="960" loading="lazy" decoding="async"
+                 alt="Bar chart: average spend per purchase line stays near 26 dollars across all four household sizes.">
+          </a>
+        </div>
+        <figcaption>
+          <p class="takeaway"><span class="fig-num">07</span> Average line value is flat at about $26</p>
+          <p class="how">
+            This is the average <strong>line item</strong>, not the average order. Grouping lines
+            by order date, a basket averages about <strong>$53</strong> and is just as flat across
+            household size. Larger households buy more lines at the same price per line rather
+            than more expensive things.
+          </p>
+          <div class="chip-row">
+            <span class="chip">Line value r = 0.005</span>
+            <span class="chip">Basket value flat at about $53</span>
+          </div>
+        </figcaption>
+      </figure>
+    </div>
+  </div>
+</section>
+
+<section class="chapter" id="demographics">
+  <div class="wrap">
+    <div class="chapter-head">
+      <p class="eyebrow">Demographics</p>
+      <h2>Who you are explains almost nothing</h2>
+      <p class="lede">
+        Gender, race and state are all recorded. None of them separate households in a way that
+        a model can use.
+      </p>
+    </div>
+
+    <div class="figure-stack figure-stack--split">
+      <figure class="chart-card">
+        <div class="chart-media">
+          <a class="chart-link" href="assets/img/eda-race-1.png">
+            <img src="assets/img/eda-race-1.png" width="1920" height="960" loading="lazy" decoding="async"
+                 alt="Dot plot of mean household size by race group with 95 percent intervals. All group means fall between 2.41 and 2.56.">
+          </a>
+        </div>
+        <figcaption>
+          <p class="takeaway"><span class="fig-num">08</span> Race group means span 0.15 of a person</p>
+          <p class="how">
+            Every well-sampled group lands between 2.41 and 2.56 on a 1-to-4 scale, and the
+            intervals overlap almost completely. Groups with fewer than 20 respondents are
+            dropped because their intervals are wider than the chart.
+          </p>
+        </figcaption>
+      </figure>
+
+      <figure class="chart-card">
+        <div class="chart-media">
+          <a class="chart-link" href="assets/img/eda-state-1.png">
+            <img src="assets/img/eda-state-1.png" width="1920" height="1600" loading="lazy" decoding="async"
+                 alt="Dot plot of mean household size by state for states with at least 20 respondents. All means fall between roughly 2.0 and 2.7.">
+          </a>
+        </div>
+        <figcaption>
+          <p class="takeaway"><span class="fig-num">09</span> State averages span less than one person</p>
+          <p class="how">
+            Among states with at least 20 labeled respondents, averages sit in a narrow band
+            from 2.04 to 2.61 around the overall mean of 2.44. The only outliers anywhere in
+            the data are tiny groups that no model can learn from: one respondent outside the
+            US (4.0) and nine in Hawaii (3.56).
+          </p>
+        </figcaption>
+      </figure>
+    </div>
+
+    <div class="note">
+      <h3>Why the original state chart was unreadable</h3>
+      <p>
+        It drew all 52 levels as bars with rotated labels, in a panel wide enough to fit them
+        only by shrinking the text past legibility. Worse, the two smallest groups set the top
+        of the axis, so one respondent from outside the US stretched the scale for everyone.
+        The fix is to filter to groups with enough data and plot points with intervals, which is
+        what the chart above does.
+      </p>
+    </div>
+  </div>
+</section>
+
+<section class="chapter chapter--tint chapter--models" id="models">
+  <div class="wrap">
+    <div class="chapter-head">
+      <p class="eyebrow">Models</p>
+      <h2>Three learners, one pipeline, a statistical tie</h2>
+      <p class="lede">
+        Linear regression, a random forest and XGBoost, all scored on the same ten folds of the
+        same 3,027 labeled rows.
+      </p>
+    </div>
+
+    <div class="kpi-grid">
+      <div class="kpi">
+        <p class="kpi-value">1.066</p>
+        <p class="kpi-label">Best cross-validated RMSE, random forest</p>
+      </div>
+      <div class="kpi">
+        <p class="kpi-value">1.079</p>
+        <p class="kpi-label">Worst cross-validated RMSE, linear model</p>
+      </div>
+      <div class="kpi">
+        <p class="kpi-value">0.013</p>
+        <p class="kpi-label">Gap between best and worst, in household-size units</p>
+      </div>
+      <div class="kpi">
+        <p class="kpi-value">0.032</p>
+        <p class="kpi-label">Typical fold-to-fold standard deviation, larger than the gap</p>
+      </div>
+    </div>
+
+    <div class="scoreboard">
+      <table>
+        <caption>Ten-fold cross-validated RMSE on the 3,027 labeled rows</caption>
+        <thead>
+          <tr>
+            <th scope="col">Learner</th>
+            <th scope="col" class="num">Mean RMSE</th>
+            <th scope="col" class="num">SD</th>
+            <th scope="col" class="num">Best fold</th>
+            <th scope="col" class="num">Worst fold</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Random forest</td>
+            <td class="num">1.066</td>
+            <td class="num">0.034</td>
+            <td class="num">1.031</td>
+            <td class="num">1.133</td>
+          </tr>
+          <tr>
+            <td>XGBoost</td>
+            <td class="num">1.074</td>
+            <td class="num">0.035</td>
+            <td class="num">1.019</td>
+            <td class="num">1.143</td>
+          </tr>
+          <tr>
+            <td>Linear model</td>
+            <td class="num">1.079</td>
+            <td class="num">0.027</td>
+            <td class="num">1.043</td>
+            <td class="num">1.129</td>
+          </tr>
+        </tbody>
+        <tfoot>
+          <tr>
+            <td colspan="5">
+              Lower is better. Household size is measured in people, so RMSE is roughly "how many
+              people off, on average". The three means differ by less than a single fold's
+              standard deviation, so the ranking is not stable.
+            </td>
+          </tr>
+        </tfoot>
+      </table>
+    </div>
+
+    <div class="figure-stack">
+      <figure class="chart-card">
+        <div class="chart-media">
+          <a class="chart-link" href="assets/img/benchmark-rmse-1.png">
+            <img src="assets/img/benchmark-rmse-1.png" width="1920" height="960" loading="lazy" decoding="async"
+                 alt="Dot plot of mean cross-validated RMSE for the three learners with grey bars spanning the best and worst fold. All three overlap.">
+          </a>
+        </div>
+        <figcaption>
+          <p class="takeaway"><span class="fig-num">10</span> The fold ranges overlap completely</p>
+          <p class="how">
+            Dots are mean RMSE; grey bars span the best and worst of the ten folds. A learner
+            that wins on the mean but loses inside the range of another learner has not won
+            anything. Reporting a winner here would be reading noise as signal.
+          </p>
+          <div class="chip-row">
+            <span class="chip">10 folds</span>
+            <span class="chip">Same folds for all three</span>
+            <span class="chip">No holdout</span>
+          </div>
+        </figcaption>
+      </figure>
+
+      <figure class="chart-card">
+        <div class="chart-media">
+          <a class="chart-link" href="assets/img/benchmark-folds-1.png">
+            <img src="assets/img/benchmark-folds-1.png" width="1920" height="960" loading="lazy" decoding="async"
+                 alt="Line chart of RMSE by fold for each learner. The three lines cross repeatedly with no consistent ordering.">
+          </a>
+        </div>
+        <figcaption>
+          <p class="takeaway"><span class="fig-num">11</span> They swap places fold by fold</p>
+          <p class="how">
+            The lines cross repeatedly, which is the definition of a tie. Fold 3 is hard for
+            everyone and fold 5 is easy for everyone, and that shared variation is much larger
+            than the difference between learners.
+          </p>
+        </figcaption>
+      </figure>
+    </div>
+  </div>
+</section>
+
+<section class="chapter" id="interpretation">
+  <div class="wrap">
+    <div class="chapter-head">
+      <p class="eyebrow">Interpretation</p>
+      <h2>What the model actually learned</h2>
+      <p class="lede">
+        Gain importance ranks the features XGBoost used to reduce error. Partial dependence shows
+        the shape of each relationship, averaged over the labeled rows.
+      </p>
+    </div>
+
+    <div class="figure-stack">
+      <figure class="chart-card">
+        <div class="chart-media">
+          <a class="chart-link" href="assets/img/model-importance-1.png">
+            <img src="assets/img/model-importance-1.png" width="1920" height="960" loading="lazy" decoding="async"
+                 alt="Horizontal bar chart of the top twelve XGBoost features by gain importance.">
+          </a>
+        </div>
+        <figcaption>
+          <p class="takeaway"><span class="fig-num">12</span> Children's items lead the importance ranking</p>
+          <p class="how">
+            Gain rewards splits that actually reduce error, so it is a better ranking than raw
+            split counts. The purchase-volume features follow, and the state dummies sit at the
+            bottom, which matches the correlation table.
+          </p>
+        </figcaption>
+      </figure>
+
+      <figure class="chart-card">
+        <div class="chart-media">
+          <a class="chart-link" href="assets/img/model-pdp-children-1.png">
+            <img src="assets/img/model-pdp-children-1.png" width="1920" height="960" loading="lazy" decoding="async"
+                 alt="Eighty faint orange individual conditional expectation curves rising with children's items, with a bold navy partial dependence line on top.">
+          </a>
+        </div>
+        <figcaption>
+          <p class="takeaway"><span class="fig-num">13</span> More children's products, larger predicted household</p>
+          <p class="how">
+            The bold line is the partial-dependence average and the faint lines are 80 sampled
+            respondents. The original version of this chart drew every row, which produced a
+            solid block of colour; sampling makes the spread visible and the average legible.
+          </p>
+          <div class="chip-row">
+            <span class="chip">80 sampled curves</span>
+            <span class="chip">Bold line is the PDP</span>
+          </div>
+        </figcaption>
+      </figure>
+
+      <figure class="chart-card">
+        <div class="chart-media">
+          <a class="chart-link" href="assets/img/model-pdp-spend-1.png">
+            <img src="assets/img/model-pdp-spend-1.png" width="1920" height="960" loading="lazy" decoding="async"
+                 alt="Eighty faint blue individual conditional expectation curves that stay flat as total spend increases, with a bold nearly horizontal partial dependence line.">
+          </a>
+        </div>
+        <figcaption>
+          <p class="takeaway"><span class="fig-num">14</span> Total spend barely moves the prediction</p>
+          <p class="how">
+            Spend is heavily skewed, so the x-axis is log-scaled; without that every curve piles
+            up at the left edge. The average line is close to horizontal. Spending more mostly
+            reflects a longer account history, not a bigger household.
+          </p>
+        </figcaption>
+      </figure>
+    </div>
+  </div>
+</section>
+
+<section class="chapter chapter--tint" id="methods">
+  <div class="wrap">
+    <div class="chapter-head">
+      <p class="eyebrow">Methods</p>
+      <h2>How the numbers were produced</h2>
+      <p class="lede">
+        Everything below is reproducible from <code>R/render.R</code>. The analysis document is
+        <a href="https://github.com/summerkirbs/Amazon-Consumer-Household-Size-Prediction/blob/main/model.md">model.md</a>, and the tables the site reads are written to
+        <code>outputs/</code>.
+      </p>
+    </div>
+
+    <div class="methods-grid">
+      <div class="method-card">
+        <h3>Data</h3>
+        <p>
+          Two files: a respondent survey and a purchase log. The survey has 5,027 rows and one
+          target column. The log has 1,850,717 line items covering January 2018 to August 2024,
+          and every survey ID appears in it.
+        </p>
+        <p>
+          The 2,000 rows flagged <code>test</code> have no household size, so they are a
+          prediction set rather than a holdout. Evaluation is ten-fold cross-validation on the
+          3,027 labeled rows.
+        </p>
+      </div>
+
+      <div class="method-card">
+        <h3>Features</h3>
+        <ul>
+          <li>Purchase lines rolled up to one row per respondent</li>
+          <li>Volume: lines per day, total spend, total items, average line value and quantity</li>
+          <li>Three keyword bins: children's products, food and grocery, shared consumables</li>
+          <li>Demographics: gender and state as real factors, not numeric codes</li>
+        </ul>
+      </div>
+
+      <div class="method-card">
+        <h3>Three corrections that changed the answer</h3>
+        <ol>
+          <li>
+            <strong>Category bins were leaking.</strong> The children's bin counted pet toys and
+            the food bin counted pet food, storage containers and blenders. Tightening the
+            keyword rules removed thousands of false matches.
+          </li>
+          <li>
+            <strong>Time drifted.</strong> Purchase rates were divided by days since first order,
+            measured to <code>Sys.Date()</code>, so every rerun changed the numbers. The snapshot
+            is now fixed at the last order date, 2024-08-15.
+          </li>
+          <li>
+            <strong>Categoricals were numbered.</strong> Encoding state as
+            <code>as.numeric(factor(x))</code> tells a linear model that Wyoming is 46 units from
+            Ohio. States with fewer than 20 respondents also broke <code>lm()</code> in
+            cross-validation, so they are pooled into "Other".
+          </li>
+        </ol>
+      </div>
+
+      <div class="method-card">
+        <h3>Evaluation</h3>
+        <ul>
+          <li>Ten folds, the same folds for all three learners</li>
+          <li>RMSE in household-size units, reported per fold</li>
+          <li>Predictions rounded and clipped to the legal range 1&ndash;4 for every learner</li>
+          <li>Fixed seed, so the table does not move between runs</li>
+          <li>Squared-error loss shrinks predictions toward the mean, so the 2,000 predictions are almost all 2s and 3s</li>
+        </ul>
+      </div>
+
+      <div class="method-card method-card-wide">
+        <h3>Files</h3>
+        <ul class="code-list">
+          <li><a href="https://github.com/summerkirbs/Amazon-Consumer-Household-Size-Prediction/blob/main/model.md"><code>model.md</code></a> &mdash; the full analysis, with every chunk and every figure</li>
+          <li><a href="R/render.R"><code>R/render.R</code></a> &mdash; knits the analysis and rebuilds <code>assets/img/</code></li>
+          <li><a href="outputs/model_benchmark.csv"><code>outputs/model_benchmark.csv</code></a> &mdash; the scoreboard above</li>
+          <li><a href="outputs/eda_by_household.csv"><code>outputs/eda_by_household.csv</code></a> &mdash; the group means behind the charts</li>
+          <li><a href="outputs/feature_correlations.csv"><code>outputs/feature_correlations.csv</code></a> &mdash; the correlation table</li>
+          <li><a href="outputs/hh_size_predictions_final.csv"><code>outputs/hh_size_predictions_final.csv</code></a> &mdash; predictions for the 2,000 unlabeled rows</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="chapter" id="limits">
+  <div class="wrap">
+    <div class="chapter-head">
+      <p class="eyebrow">Limitations</p>
+      <h2>What this analysis cannot claim</h2>
+      <p class="lede">
+        These are the boundaries of the result, not footnotes. Each one constrains how far the
+        conclusion travels.
+      </p>
+    </div>
+
+    <div class="methods-grid">
+      <div class="method-card">
+        <h3>No holdout score</h3>
+        <p>
+          The 2,000 test rows are unlabeled, so every number here is cross-validated on the same
+          3,027 rows the model was built from. A cross-validated estimate is still an estimate on
+          the population the model was fitted to.
+        </p>
+      </div>
+      <div class="method-card">
+        <h3>The target is censored at 4</h3>
+        <p>
+          Households of four and households of seven are the same label. Part of the residual
+          error is this ceiling, not model failure, and no feature can fix it.
+        </p>
+      </div>
+      <div class="method-card">
+        <h3>Keyword bins are approximations</h3>
+        <p>
+          The three category bins are hand-written regular expressions, not Amazon's taxonomy.
+          They are documented and reproducible, but they will miss products and they carry
+          residual miscategorization.
+        </p>
+      </div>
+      <div class="method-card">
+        <h3>XGBoost was tuned on this data</h3>
+        <p>
+          Its hyperparameters come from an earlier search on these same rows, so its
+          cross-validated score is mildly optimistic relative to the untuned linear model and
+          forest. It still does not win.
+        </p>
+      </div>
+      <div class="method-card">
+        <h3>Three learners, not a leaderboard</h3>
+        <p>
+          A LightGBM result from the earlier write-up is not reproduced here because it was
+          fitted through a different pipeline and would not be comparable. The submitted report's
+          claimed XGBoost margin does not survive a like-for-like rerun.
+        </p>
+      </div>
+      <div class="method-card">
+        <h3>Observational, not causal</h3>
+        <p>
+          Buying children's products correlates with a larger household. That does not mean
+          buying them causes a larger household, or the reverse. Nothing here is a causal
+          estimate.
+        </p>
+      </div>
+    </div>
+
+    <div class="note">
+      <h3>Corrections carried over from the submitted report</h3>
+      <p>
+        The original write-up scored the unlabeled test rows, labeled a chart of RMSE as MSE,
+        named a per-day line count "items per day", used a target column that drifted with the
+        system date, and encoded categories as arbitrary integers. Each of those is fixed in
+        this rebuild, which is why the numbers here are lower and closer together than the
+        submitted ones.
+      </p>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <a href="#top">Back to top</a>
+    <a href="https://github.com/summerkirbs/Amazon-Consumer-Household-Size-Prediction/blob/main/model.md">Full analysis</a>
+    <a href="R/render.R">Rebuild script</a>
+    <a href="https://github.com/summerkirbs/Amazon-Consumer-Household-Size-Prediction">Source on GitHub</a>
+  </div>
+</footer>
+
+</body>
+</html>

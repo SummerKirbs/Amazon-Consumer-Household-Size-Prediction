@@ -1,409 +1,842 @@
 ---
-title: "Amazon Consumer Household Size Prediction Model"
+title: "Amazon Consumer Household Size Prediction"
+subtitle: "STATS 101C regression project, revised"
 output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+    df_print: paged
   pdf_document: default
-  html_document: default
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(
+  echo       = TRUE,
+  comment    = "#>",
+  message    = FALSE,
+  warning    = FALSE,
+  fig.width  = 9.6,
+  fig.height = 4.8,
+  dpi        = 200,
+  out.width  = "100%",
+  fig.path   = "assets/img/"
+)
+
+# Cross-validation folds and the forest are both random. One seed at the top means the
+# numbers in this document do not move between runs.
+set.seed(101)
 ```
 
-## Data And Packages
+## What this asks
 
-```{r}
-survey <- read.csv("survey_train_test.csv")
-amazon_purchase <- read.csv("amazon-purchases.csv")
+The survey asks each respondent how many people live in their household. The purchase
+log records what that same account bought, when, and for how much.
 
-library(mlr3verse)
-library(mlr3tuning)
-library(ggplot2)
+The question: **can purchase behavior predict household size better than demographics
+alone?**
+
+The answer is short. Children's products carry most of the signal. Purchase volume carries a
+little. Demographics carry almost none. And the three models we compare land within about one
+hundredth of each other, which is less than the fold-to-fold noise. That is a tie, not a
+winner.
+
+## Data
+
+```{r data-load}
+# The two source files are not committed. Put them in DATA/ before knitting.
+data_dir <- "DATA"
+
+survey  <- read.csv(file.path(data_dir, "survey_train_test.csv"))
+purchases <- read.csv(file.path(data_dir, "amazon-purchases.csv"))
+
+purchases$Order.Date <- as.Date(purchases$Order.Date)
+
+dim(survey)
+dim(purchases)
+```
+
+```{r data-shape}
+# One row per respondent, one row per purchase line.
+nrow(survey)
+nrow(purchases)
+
+# The flag marks the unlabeled prediction set, not a scored holdout.
+table(survey$test)
+
+# The target only takes four values.
+table(survey$Q.amazon.use.hh.size.num, useNA = "ifany")
+```
+
+Two facts drive every choice that follows.
+
+1. **The 2,000 `test` rows have no household size.** They are a prediction set, not a
+   holdout. So the only honest evaluation is cross-validation on the 3,027 labeled rows.
+   The original write-up scored these rows, which quietly turned a model selection into a
+   test-set score. This version does not.
+2. **The target is capped at 4.** The survey groups "4 or more" into one bucket, so this is
+   an ordered four-class problem squeezed into a regression. A model cannot distinguish a
+   household of 4 from a household of 7.
+
+```{r package-setup}
 library(tidyverse)
+library(mlr3verse)
 library(ranger)
 library(xgboost)
-library(iml)
 ```
 
-## Feature Engineering
+## Feature engineering
 
-```{r}
-# Keep the survey fields needed for modeling.
-survey_features <- survey |>
-  select(Survey.ResponseID, Q.amazon.use.hh.size.num, Q.demos.gender, Q.demos.state, test)
+Purchase lines are rolled up to the respondent level. Every feature below is a summary of
+that person's whole history, not a single order.
 
-# Summarize each respondent's purchase history.
-purchase_features <- amazon_purchase |>
-  mutate(Order.Date = as.Date(Order.Date)) |>
+```{r feature-build}
+# Anchor every time-based feature to one fixed date.
+# Using Sys.Date() made the pipeline drift a few days every time it ran, which moved
+# purchase rates for no substantive reason. This is the last order date in the extract.
+SNAPSHOT_DATE <- as.Date("2024-08-15")
+stopifnot(SNAPSHOT_DATE == max(purchases$Order.Date, na.rm = TRUE))
+
+purchase_features <- purchases |>
+  mutate(line_value = Purchase.Price.Per.Unit * Quantity) |>
   group_by(Survey.ResponseID) |>
   summarize(
     first_purchase = min(Order.Date, na.rm = TRUE),
-    since_first_purchase = as.numeric(Sys.Date() - first_purchase),
-    purchase_freq = ifelse(n() > 1, n() / pmax(since_first_purchase, 1), 0),
-    total_spend = sum(Purchase.Price.Per.Unit * Quantity, na.rm = TRUE),
-    avg_purchase_value = mean(Purchase.Price.Per.Unit * Quantity, na.rm = TRUE),
-    total_items = sum(Quantity, na.rm = TRUE),
-    avg_purchase_quantity = mean(Quantity, na.rm = TRUE),
-    children_items = sum(grepl("BABY|CHILD|TOY", Category, ignore.case = TRUE)),
-    food_items = sum(grepl("FOOD|GROCERY|MEAT|POULTRY", Category, ignore.case = TRUE)),
-    multiuse_items = sum(grepl("CLEANING|DETERGENT|TISSUE|TOILET|TOOTH|TOWEL", Category, ignore.case = TRUE)),
+    days_active     = as.numeric(SNAPSHOT_DATE - first_purchase),
+
+    # Lines per day over the account's observed life. This counts order lines, not items,
+    # so the name says "lines" to match what the code actually computes.
+    # The earlier name was purchase_freq, which the report read as items per day.
+    order_lines = n(),
+    purchase_lines_per_day = order_lines / pmax(days_active, 1),
+
+    total_spend      = sum(line_value, na.rm = TRUE),
+    avg_line_value   = mean(line_value, na.rm = TRUE),
+    total_items      = sum(Quantity, na.rm = TRUE),
+    avg_line_quantity = mean(Quantity, na.rm = TRUE),
+
+    # Category bins. These are hand-written keyword matches, so they are approximations,
+    # not Amazon's own taxonomy. They are tightened here to remove obvious false friends.
+    # Children: drop pet toys, which the loose "TOY" match swept in.
+    children_items = sum(
+      grepl("BABY|CHILD|TOY", Category, ignore.case = TRUE) &
+        !grepl("PET", Category, ignore.case = TRUE)
+    ),
+    # Food: exact category names only. The loose match also caught food storage containers,
+    # blenders and spatulas, plus PET_FOOD, which has nothing to do with human household size.
+    food_items = sum(grepl(
+      "^(FOOD|GROCERY|SNACK_FOOD_BAR|MEAT|POULTRY|VEGETABLE|FRUIT|BEVERAGE|COFFEE|TEA|DRINK|CANDY|BAKED|DAIRY|SEAFOOD|GRAIN|SPICE|CONDIMENT|NUTRITIONAL_SUPPLEMENT)$",
+      Category, ignore.case = TRUE
+    )),
+    # Shared consumables: paper goods and cleaning products a household burns through.
+    # The loose match also caught skin cleansers, toothbrush heads and toilet seats.
+    multiuse_items = sum(grepl(
+      "TOILET_PAPER|PAPER_TOWEL|LAUNDRY_DETERGENT|DISHWASHER_DETERGENT|CLEANING_AGENT|SURFACE_CLEANING_WIPE|FACIAL_TISSUE|TOOTH_CLEANING_AGENT|TOOTHBRUSH|TOOTH_WHITENER|DETERGENT",
+      Category, ignore.case = TRUE
+    )),
+
     .groups = "drop"
   ) |>
-  select(-first_purchase, -since_first_purchase)
+  select(-first_purchase, -days_active)
 
-# Join survey and purchase history into one modeling table.
+survey_features <- survey |>
+  select(Survey.ResponseID, Q.amazon.use.hh.size.num, Q.demos.gender, Q.demos.state, test)
+
 dataset <- survey_features |>
   left_join(purchase_features, by = "Survey.ResponseID")
 
-clean_dataset <- dataset |>
-  mutate(across(
-    -c(Survey.ResponseID, test),
-    ~ if (is.character(.x)) as.numeric(factor(.x)) else as.numeric(.x)
+# Every respondent in the survey has purchase history, so the join is clean.
+sum(is.na(dataset$total_spend))
+```
+
+### Encoding
+
+Categorical fields stay categorical. The original code mapped them to `as.numeric(factor(x))`,
+which invents an ordering: it tells the model that two states alphabetically far apart are
+numerically far apart, and that one gender is twice another. That is not a defensible encoding
+for a linear model.
+
+One real problem shows up once state is a factor: a state with a single respondent lands in
+exactly one cross-validation fold, so the other nine folds contain an unseen level and `lm()`
+errors out. The numeric encoding hid that failure instead of fixing it. The fix is to pool
+rare states.
+
+```{r encoding}
+# Keep states with at least 20 labeled respondents. Everything else becomes "Other".
+state_keep <- dataset |>
+  filter(test == FALSE) |>
+  count(Q.demos.state) |>
+  filter(n >= 20) |>
+  pull(Q.demos.state)
+
+state_levels  <- c(state_keep, "Other")
+gender_levels <- sort(unique(dataset$Q.demos.gender))
+
+# Apply the same levels to train and prediction rows so the design matrix lines up.
+encode_factors <- function(d) {
+  d |>
+    mutate(
+      Q.demos.state  = factor(if_else(Q.demos.state %in% state_keep, Q.demos.state, "Other"),
+                              levels = state_levels),
+      Q.demos.gender = factor(Q.demos.gender, levels = gender_levels)
+    )
+}
+
+training <- dataset |> filter(test == FALSE) |> select(-test) |> encode_factors()
+testing  <- dataset |> filter(test == TRUE)  |> select(-test) |> encode_factors()
+
+# How much did pooling shrink the state field?
+length(unique(dataset$Q.demos.state))
+length(state_levels)
+```
+
+## Exploratory data analysis
+
+### What actually separates small households from large ones
+
+```{r eda-household-counts}
+# Class balance first. The four groups are close enough that no single class dominates.
+household_counts <- training |>
+  count(household = Q.amazon.use.hh.size.num)
+
+household_counts
+
+ggplot(household_counts, aes(x = factor(household), y = n)) +
+  geom_col(fill = "#0b2545", width = 0.68) +
+  geom_text(aes(label = scales::comma(n)), vjust = -0.5, size = 3.4, colour = "#0b2545") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.12))) +
+  labs(
+    title = "Labeled respondents by household size",
+    subtitle = "3,027 labeled rows; the groups are balanced enough for cross-validation",
+    x = "Household size", y = "Respondents"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor = element_blank(), panel.grid.major.x = element_blank())
+```
+
+```{r eda-children-items}
+# The headline relationship. Children's products climb steeply with household size.
+by_household <- training |>
+  group_by(household = Q.amazon.use.hh.size.num) |>
+  summarize(
+    n                = n(),
+    children_items   = mean(children_items),
+    food_items       = mean(food_items),
+    multiuse_items   = mean(multiuse_items),
+    total_items      = mean(total_items),
+    total_spend      = mean(total_spend),
+    avg_line_value   = mean(avg_line_value),
+    lines_per_day    = mean(purchase_lines_per_day),
+    .groups = "drop"
+  )
+
+by_household
+
+ggplot(by_household, aes(x = factor(household), y = children_items)) +
+  geom_col(fill = "#e07a1f", width = 0.68) +
+  geom_text(aes(label = round(children_items, 1)), vjust = -0.5, size = 3.6, colour = "#7a3d06") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.12))) +
+  labs(
+    title = "Children's products rise steeply with household size",
+    subtitle = "Mean number of baby, child and toy lines per respondent",
+    x = "Household size", y = "Children's items (mean)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor = element_blank(), panel.grid.major.x = element_blank())
+```
+
+```{r eda-purchase-volume}
+# Volume moves too, but far more gently. This is the "more people, more stuff" effect.
+ggplot(by_household, aes(x = factor(household), y = total_items)) +
+  geom_col(fill = "#2b6f8f", width = 0.68) +
+  geom_text(aes(label = round(total_items)), vjust = -0.5, size = 3.6, colour = "#123646") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.12))) +
+  labs(
+    title = "Total items purchased rises gently",
+    subtitle = "Mean item count per respondent, 2018-2024",
+    x = "Household size", y = "Items purchased (mean)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor = element_blank(), panel.grid.major.x = element_blank())
+```
+
+```{r eda-category-groups}
+# Three keyword bins on one shared axis, each indexed to its own mean at household size 1.
+# The earlier version gave every facet its own y-scale, which made the two flat bins look
+# as steep as the children's bin. Indexing removes that illusion.
+category_index <- by_household |>
+  select(household, children_items, food_items, multiuse_items) |>
+  pivot_longer(-household, names_to = "group", values_to = "mean_items") |>
+  group_by(group) |>
+  mutate(index = 100 * mean_items / mean_items[household == 1]) |>
+  ungroup() |>
+  mutate(group = recode(group,
+    children_items = "Children's products",
+    food_items     = "Food and grocery",
+    multiuse_items = "Shared consumables"
   ))
 
-# Split the cleaned data while keeping the original test flag intact.
-training <- clean_dataset |>
-  filter(test == FALSE) |>
-  select(-test)
+category_index
 
-testing <- clean_dataset |>
-  filter(test == TRUE) |>
-  select(-test)
-
-# Quick state-level summaries for exploration.
-demographic_patterns <- survey |>
-  filter(test == FALSE) |>
-  group_by(Q.demos.state) |>
-  summarize(
-    prop_early_adult = sum(Q.demos.age %in% c("18 - 24 years", "25 - 34 years"), na.rm = TRUE) / n(),
-    prop_mid_adult = sum(Q.demos.age %in% c("35 - 44 years", "45 - 54 years"), na.rm = TRUE) / n(),
-    prop_high_income = sum(grepl("100,000|150,000|200,000", Q.demos.income), na.rm = TRUE) / n(),
-    prop_mid_income = sum(grepl("50,000|75,000", Q.demos.income), na.rm = TRUE) / n(),
-    prop_low_income = sum(grepl("25,000", Q.demos.income), na.rm = TRUE) / n(),
-    prop_na_income = sum(grepl("prefer not to say", Q.demos.income, ignore.case = TRUE), na.rm = TRUE) / n(),
-    prop_college = sum(grepl("Degree", Q.demos.education, ignore.case = TRUE), na.rm = TRUE) / n(),
-    prop_na_college = sum(grepl("prefer not to say", Q.demos.education, ignore.case = TRUE), na.rm = TRUE) / n(),
-    .groups = "drop"
-  )
-
-behavioral_patterns <- survey |>
-  filter(test == FALSE) |>
-  group_by(Q.demos.state) |>
-  summarize(
-    substance_rate = sum(Q.substance.use.cigarettes == "Yes" | Q.substance.use.marijuana == "Yes" | Q.substance.use.alcohol == "Yes") / n(),
-    health_issue_rate = sum(Q.personal.diabetes == "Yes" | Q.personal.wheelchair == "Yes") / n(),
-    .groups = "drop"
+ggplot(category_index, aes(x = household, y = index, colour = group)) +
+  geom_hline(yintercept = 100, linetype = "dashed", colour = "#9aa7b4") +
+  geom_line(linewidth = 1.1) +
+  geom_point(size = 2.6) +
+  # Label only the last point: labelling all four collides where the lines are close.
+  geom_text(data = filter(category_index, household == max(household)),
+            aes(label = sprintf("%.0f%%", index)), vjust = -0.9, size = 3.6, show.legend = FALSE) +
+  scale_colour_manual(values = c(
+    "Children's products" = "#e07a1f",
+    "Food and grocery"    = "#3f8f7a",
+    "Shared consumables"  = "#8d9aa8"
+  )) +
+  scale_x_continuous(breaks = 1:4) +
+  scale_y_continuous(limits = c(80, 490), labels = function(x) paste0(x, "%")) +
+  labs(
+    title = "Against a household of one, only children's products keep climbing",
+    subtitle = "Each category indexed to its own mean at household size 1; dashed line is no change",
+    x = "Household size", y = "Change vs. household of one", colour = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank(),
+    legend.position = "top",
+    legend.justification = "left"
   )
 ```
 
-## Exploratory Data Analysis
+```{r eda-spend-flat}
+# Spending does not separate the groups. This is the flat line the report described,
+# but it is average *line* value, not average basket. Grouping lines by order date, the
+# average basket is about $53, roughly twice this, and just as flat.
+ggplot(by_household, aes(x = factor(household), y = avg_line_value)) +
+  geom_col(fill = "#c8b6a6", width = 0.68) +
+  geom_text(aes(label = scales::dollar(round(avg_line_value, 2))), vjust = -0.5, size = 3.6, colour = "#5c4a3d") +
+  coord_cartesian(ylim = c(0, 30)) +
+  labs(
+    title = "Average spend per purchase line is flat",
+    subtitle = "Around $26 per line regardless of household size",
+    x = "Household size", y = "Line value (USD, mean)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor = element_blank(), panel.grid.major.x = element_blank())
+```
 
-```{r}
-survey_test <- survey |> filter(test == TRUE)
-survey_train <- survey |> filter(test == FALSE)
+```{r eda-rate}
+# Frequency helps a little. Larger households order more often, not more per line.
+ggplot(by_household, aes(x = factor(household), y = lines_per_day)) +
+  geom_col(fill = "#4a6fa5", width = 0.68) +
+  geom_text(aes(label = sprintf("%.3f", lines_per_day)), vjust = -0.5, size = 3.6, colour = "#22375c") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.12))) +
+  labs(
+    title = "Larger households order slightly more often",
+    subtitle = "Purchase lines per day since the first order",
+    x = "Household size", y = "Lines per day (mean)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor = element_blank(), panel.grid.major.x = element_blank())
+```
 
-purchase_per_user <- amazon_purchase |>
-  mutate(Total.Purchase = Purchase.Price.Per.Unit * Quantity) |>
-  group_by(Survey.ResponseID) |>
-  summarize(
-    Total.Purchase.per.User = sum(Total.Purchase),
-    Avg.Purchase.per.User = mean(Total.Purchase),
-    Purchase.Times = n(),
-    .groups = "drop"
-  )
+### Demographics
 
-amazon_eda <- purchase_per_user |>
-  inner_join(survey_train, by = "Survey.ResponseID")
+```{r eda-race}
+# Race groups, with multi-race answers collapsed into one category.
+# This reads the survey table directly because the race column is not a model feature,
+# and because the 2,000 blank race values are exactly the unlabeled prediction rows.
+race_labeled <- survey |>
+  filter(test == FALSE) |>
+  mutate(race = if_else(str_detect(Q.demos.race, ","), "Multiracial", Q.demos.race))
 
-# State-level household size.
-amazon_eda_state <- amazon_eda |>
-  filter(!is.na(Total.Purchase.per.User), !is.na(Q.demos.state)) |>
-  group_by(Q.demos.state) |>
-  summarize(
-    total_purchase_amount = mean(Total.Purchase.per.User),
-    avg_purchase_amount = mean(Avg.Purchase.per.User),
-    purchase_times = mean(Purchase.Times),
-    count = n(),
-    avg_household_size = mean(Q.amazon.use.hh.size.num, na.rm = TRUE),
-    .groups = "drop"
-  )
-
-ggplot(amazon_eda_state, aes(x = as.factor(Q.demos.state), y = avg_household_size)) +
-  geom_col(fill = "skyblue3") +
-  labs(title = "Average Household Size by State", x = "State", y = "Avg Household Size") +
-  theme_minimal()
-
-# Race-level household size.
-amazon_eda_race <- amazon_eda |>
-  filter(!is.na(Total.Purchase.per.User), !is.na(Q.demos.race)) |>
-  separate_rows(Q.demos.race, sep = ",") |>
-  group_by(Survey.ResponseID) |>
-  mutate(count = n()) |>
-  ungroup() |>
-  mutate(race = ifelse(count != 1, "Multi", Q.demos.race)) |>
+race_summary <- race_labeled |>
   group_by(race) |>
   summarize(
-    total_purchase_amount = mean(Total.Purchase.per.User),
-    avg_purchase_amount = mean(Avg.Purchase.per.User),
-    purchase_times = mean(Purchase.Times),
-    count = n(),
-    avg_household_size = mean(Q.amazon.use.hh.size.num, na.rm = TRUE),
+    n              = n(),
+    mean_household = mean(Q.amazon.use.hh.size.num),
+    se             = sd(Q.amazon.use.hh.size.num) / sqrt(n()),
     .groups = "drop"
-  )
+  ) |>
+  # Same 20-respondent floor used for states. Below it the interval is wider than the
+  # whole range of the chart, so those groups get dropped rather than drawn as a spike.
+  filter(n >= 20) |>
+  arrange(mean_household)
 
-ggplot(amazon_eda_race, aes(x = as.factor(race), y = avg_household_size)) +
-  geom_col(fill = "skyblue3") +
-  labs(title = "Average Household Size by Race", x = "Race", y = "Avg Household Size") +
-  theme_minimal()
+race_summary
 
-# Household size versus spending.
-amazon_eda_purchase <- amazon_eda |>
-  filter(!is.na(Total.Purchase.per.User), !is.na(Q.amazon.use.hh.size.num)) |>
-  group_by(Q.amazon.use.hh.size.num) |>
-  summarize(
-    total_purchase_amount = mean(Total.Purchase.per.User),
-    avg_purchase_amount = mean(Avg.Purchase.per.User),
-    purchase_times = mean(Purchase.Times),
-    count = n(),
-    .groups = "drop"
-  )
-
-ggplot(amazon_eda_purchase, aes(x = as.factor(Q.amazon.use.hh.size.num), y = avg_purchase_amount)) +
-  geom_col(fill = "skyblue3") +
-  labs(title = "Average Purchase Amount by Household Size", x = "Household Size", y = "Avg Purchase Amount ($)") +
-  theme_minimal()
-
-ggplot(amazon_eda_purchase, aes(x = as.factor(Q.amazon.use.hh.size.num), y = purchase_times)) +
-  geom_col(fill = "skyblue3") +
-  labs(title = "Average Number of Items Purchased by Household Size", x = "Household Size", y = "Avg Number of Items Purchased") +
-  theme_minimal()
-
-# Use the purchase summary from the feature-engineering step.
-purchase_hist_eda <- survey_train |>
-  inner_join(purchase_features, by = "Survey.ResponseID")
-
-purchase_hist_eda_grouped <- purchase_hist_eda |>
-  group_by(Q.amazon.use.hh.size.num) |>
-  summarize(
-    avg_purchase_freq = mean(purchase_freq, na.rm = TRUE),
-    avg_children_items = mean(children_items, na.rm = TRUE),
-    avg_food_items = mean(food_items, na.rm = TRUE),
-    avg_multiuse_items = mean(multiuse_items, na.rm = TRUE),
-    .groups = "drop"
-  )
-
-ggplot(purchase_hist_eda_grouped, aes(x = as.factor(Q.amazon.use.hh.size.num), y = avg_purchase_freq)) +
-  geom_col(fill = "skyblue3") +
-  labs(title = "Purchase Frequency and Household Size", x = "Household Size", y = "Purchase Frequency") +
-  theme_minimal()
-
-ggplot(purchase_hist_eda_grouped, aes(x = as.factor(Q.amazon.use.hh.size.num), y = avg_children_items)) +
-  geom_col(fill = "skyblue3") +
-  labs(title = "Children Items by Household Size", x = "Household Size", y = "Avg Number of Purchases") +
-  theme_minimal()
-
-ggplot(purchase_hist_eda_grouped, aes(x = as.factor(Q.amazon.use.hh.size.num), y = avg_food_items)) +
-  geom_col(fill = "skyblue3") +
-  labs(title = "Food Items by Household Size", x = "Household Size", y = "Avg Number of Purchases") +
-  theme_minimal()
-
-ggplot(purchase_hist_eda_grouped, aes(x = as.factor(Q.amazon.use.hh.size.num), y = avg_multiuse_items)) +
-  geom_col(fill = "skyblue3") +
-  labs(title = "Multiuse Items by Household Size", x = "Household Size", y = "Avg Number of Purchases") +
-  theme_minimal()
-
-amazon_eda_2 <- amazon_eda |>
-  filter(!is.na(Total.Purchase.per.User), !is.na(Q.demos.age)) |>
-  group_by(Q.demos.age) |>
-  summarize(
-    total_purchase_amount = mean(Total.Purchase.per.User),
-    avg_purchase_amount = mean(Avg.Purchase.per.User),
-    purchase_times = mean(Purchase.Times),
-    .groups = "drop"
-  )
-
-ggplot(amazon_eda_2, aes(x = as.factor(Q.demos.age), y = purchase_times)) +
-  geom_col(fill = "skyblue3") +
-  labs(title = "Average Number of Purchases by Age Group", x = "Age", y = "Avg Number of Purchases") +
-  theme_minimal()
+# Dot plot with 95% intervals. Bars would imply the differences are bigger than they are.
+ggplot(race_summary, aes(x = mean_household, y = reorder(race, mean_household))) +
+  geom_vline(xintercept = mean(race_labeled$Q.amazon.use.hh.size.num),
+             linetype = "dashed", colour = "#9aa7b4") +
+  geom_errorbar(aes(xmin = mean_household - 1.96 * se, xmax = mean_household + 1.96 * se),
+                orientation = "y", width = 0, colour = "#9aa7b4") +
+  geom_point(size = 3, colour = "#0b2545") +
+  geom_text(aes(x = mean_household + 1.96 * se, label = paste0("n=", scales::comma(n))),
+            hjust = -0.2, size = 3, colour = "#5c6773") +
+  scale_x_continuous(limits = c(2.1, 3.05), breaks = seq(2.1, 2.9, by = 0.2)) +
+  labs(
+    title = "Race groups sit within a narrow band",
+    subtitle = "Mean household size with 95% intervals; groups with 20+ labeled respondents",
+    x = "Mean household size", y = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor = element_blank(),
+        panel.grid.major.x = element_blank(),
+        panel.grid.major.y = element_blank())
 ```
 
-## Linear Model
+```{r eda-state, fig.height = 8}
+# The original chart drew all 52 states as bars. At that density every label collides and
+# the two tiny groups (one non-US respondent, nine Hawaii respondents) dominate the axis
+# without being readable. A dot plot of the well-sampled states tells the same story.
+# A taller panel and larger base text keep 30-plus state names legible at page width.
+state_summary <- dataset |>
+  filter(test == FALSE) |>
+  group_by(Q.demos.state) |>
+  summarize(
+    n              = n(),
+    mean_household = mean(Q.amazon.use.hh.size.num),
+    .groups = "drop"
+  ) |>
+  filter(n >= 20) |>
+  arrange(mean_household)
 
-```{r}
+state_summary
+
+ggplot(state_summary, aes(x = mean_household, y = reorder(Q.demos.state, mean_household))) +
+  geom_vline(xintercept = mean(training$Q.amazon.use.hh.size.num),
+             linetype = "dashed", colour = "#9aa7b4") +
+  geom_segment(aes(x = 2.0, xend = mean_household,
+                   y = reorder(Q.demos.state, mean_household),
+                   yend = reorder(Q.demos.state, mean_household)),
+               colour = "#e7dccd", linewidth = 0.6) +
+  geom_point(size = 2.4, colour = "#0b2545") +
+  scale_x_continuous(limits = c(1.98, 2.7), breaks = seq(2.0, 2.7, by = 0.1)) +
+  labs(
+    title = "State averages span less than one person",
+    subtitle = "States with at least 20 labeled respondents; dashed line is the overall mean",
+    x = "Mean household size", y = NULL
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(panel.grid.minor = element_blank(), panel.grid.major.y = element_blank())
+```
+
+```{r eda-correlation}
+# Simple correlations with the target, ordered. This is the whole story in one column.
+numeric_features <- c(
+  "children_items", "purchase_lines_per_day", "total_spend", "total_items",
+  "multiuse_items", "avg_line_value", "avg_line_quantity", "food_items"
+)
+
+cor_table <- tibble(
+  feature = numeric_features,
+  correlation = map_dbl(numeric_features,
+                        ~ cor(training[[.x]], training$Q.amazon.use.hh.size.num,
+                              use = "complete.obs"))
+) |>
+  arrange(correlation) |>
+  mutate(label_x = correlation + if_else(correlation > 0, 0.006, -0.006))
+
+cor_table
+
+ggplot(cor_table, aes(x = correlation, y = reorder(feature, correlation),
+                      fill = correlation > 0.05)) +
+  geom_vline(xintercept = 0, colour = "#9aa7b4") +
+  geom_col(width = 0.62, show.legend = FALSE) +
+  scale_fill_manual(values = c(`TRUE` = "#e07a1f", `FALSE` = "#c3ccd6")) +
+  geom_text(aes(x = label_x, label = sprintf("%.3f", correlation)),
+            hjust = 0.5, size = 3.2) +
+  scale_x_continuous(limits = c(-0.03, 0.27)) +
+  labs(
+    title = "Children's products dominate every other purchase signal",
+    subtitle = "Pearson correlation with household size, labeled rows only",
+    x = "Correlation", y = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor = element_blank(), panel.grid.major.y = element_blank())
+```
+
+## Models
+
+Three learners, one pipeline, one resampling scheme. Keeping them on the same footing is the
+only way the comparison means anything.
+
+```{r task-build}
+task <- as_task_regr(
+  training |> select(-Survey.ResponseID),
+  target = "Q.amazon.use.hh.size.num",
+  id = "household_size"
+)
+
+# XGBoost hyperparameters carried over from the original tuning run.
+# Reusing them keeps this revision comparable to the submitted numbers, but it also means
+# XGBoost saw this data during tuning. Its cross-validated score is therefore a little
+# optimistic. The other two learners use defaults.
+xgb_params <- list(
+  eta              = 0.09926108,
+  max_depth        = 3,
+  min_child_weight = 9,
+  nrounds          = 1571,
+  subsample        = 0.9756695,
+  colsample_bytree = 0.8403539,
+  gamma            = 3.487319,
+  nthread          = 1,
+  verbose          = 0
+)
+
+lrn_lm  <- lrn("regr.lm", id = "linear model")
+lrn_rf  <- as_learner(po("imputemedian") %>>% lrn("regr.ranger", importance = "impurity"))
+lrn_xgb <- as_learner(
+  po("imputemedian") %>>% po("encode", method = "one-hot") %>>%
+    lrn(
+      "regr.xgboost",
+      eta              = xgb_params$eta,
+      max_depth        = xgb_params$max_depth,
+      min_child_weight = xgb_params$min_child_weight,
+      nrounds          = xgb_params$nrounds,
+      subsample        = xgb_params$subsample,
+      colsample_bytree = xgb_params$colsample_bytree,
+      gamma            = xgb_params$gamma,
+      nthread          = xgb_params$nthread,
+      verbose          = xgb_params$verbose
+    )
+)
+
+lrn_rf$id  <- "random forest"
+lrn_xgb$id <- "xgboost"
+```
+
+```{r model-lm}
+# Same specification the benchmark learner uses: every feature, nothing hand-picked.
+# Keeping the reported model and the scored model identical means the coefficients below
+# describe the model whose RMSE appears in the table.
 linear_model <- lm(
-  Q.amazon.use.hh.size.num ~ Q.demos.gender + Q.demos.state + purchase_freq + total_spend + avg_purchase_value +
-    total_items + avg_purchase_quantity + children_items + food_items + multiuse_items,
-  data = training
+  Q.amazon.use.hh.size.num ~ .,
+  data = training |> select(-Survey.ResponseID)
 )
 
 summary(linear_model)
-
-lm_predictions <- predict(linear_model, newdata = testing) |>
-  round() |>
-  pmax(1)
-
-hh_size_lm <- data.frame(
-  Survey.ResponseID = testing$Survey.ResponseID,
-  Q.amazon.use.hh.size.num = lm_predictions
-)
-
-write.csv(hh_size_lm, "hh_size_predictions2.csv", row.names = FALSE)
 ```
 
-## Random Forest Model
+The linear model is reported for interpretation, not for prediction. Its coefficients are
+associations with a four-level ordinal target, and the factor dummies for thirty-odd states are
+mostly noise. Nothing here is causal.
 
-```{r}
-training_range_rf <- range(training$Q.amazon.use.hh.size.num, na.rm = TRUE)
-task_rf <- as_task_regr(training |> select(-Survey.ResponseID), target = "Q.amazon.use.hh.size.num")
-
-learner_rf <- lrn("regr.ranger", importance = "impurity")
-learner_rf$train(task_rf)
-
-importance_scores <- learner_rf$model$model$variable.importance
-ggplot(data = data.frame(var = names(importance_scores), value = importance_scores)) +
-  geom_point(aes(x = value, y = reorder(var, value))) +
-  labs(x = "Variable Importance", y = "Variables")
-
-testing_rf <- testing |> select(-Survey.ResponseID, -Q.amazon.use.hh.size.num)
-rf_predictions <- learner_rf$predict_newdata(testing_rf)$response |>
-  round() |>
-  pmax(training_range_rf[1]) |>
-  pmin(training_range_rf[2])
-
-hh_size_rf <- data.frame(
-  Survey.ResponseID = testing$Survey.ResponseID,
-  Q.amazon.use.hh.size.num = rf_predictions
-)
-
-write.csv(hh_size_rf, "hh_size_predictions3.csv", row.names = FALSE)
+```{r model-fit}
+lrn_rf$train(task)
+lrn_xgb$train(task)
 ```
 
-## XGBoost Model
+## Interpretation
 
-```{r}
-task_xgb <- as_task_regr(training |> select(-Survey.ResponseID), target = "Q.amazon.use.hh.size.num")
+```{r model-importance}
+# XGBoost gain importance. Gain rewards splits that actually reduce error, so it is a
+# better ranking than raw split counts.
+importance <- lrn_xgb$importance()
+importance
 
-# Final tuned hyperparameters from the search step.
-learner_xgb_final <- lrn(
-  "regr.xgboost",
-  eta = 0.09926108,
-  max_depth = 3,
-  min_child_weight = 9,
-  nrounds = 1571,
-  subsample = 0.9756695,
-  colsample_bytree = 0.8403539,
-  gamma = 3.487319,
-  nthread = 1,
-  verbose = 0
-)
-
-graph_xgb <- po("imputemedian") %>>%
-  po("encode", method = "one-hot") %>>%
-  learner_xgb_final
-
-learner_xgb_final <- as_learner(graph_xgb)
-learner_xgb_final$train(task_xgb)
-
-testing_xgb <- testing |> select(-Survey.ResponseID, -Q.amazon.use.hh.size.num)
-xgb_predictions <- learner_xgb_final$predict_newdata(testing_xgb)$response
-```
-
-## Model Interpretation
-
-```{r}
-importance <- learner_xgb_final$importance()
-
-imp_df <- data.frame(
-  feature = names(importance),
+importance_df <- tibble(
+  feature    = names(importance),
   importance = as.numeric(importance)
 ) |>
-  arrange(importance) |>
-  mutate(feature = factor(feature, levels = feature))
+  slice_max(importance, n = 12, with_ties = FALSE) |>
+  arrange(importance)
 
-ggplot(imp_df, aes(x = feature, y = importance)) +
-  geom_col(fill = "steelblue") +
-  coord_flip() +
-  labs(title = "XGBoost Model: Feature Importance", x = "", y = "Importance") +
-  theme_minimal()
+importance_df
+
+ggplot(importance_df, aes(x = importance, y = reorder(feature, importance))) +
+  geom_col(fill = "#0b2545", width = 0.65) +
+  labs(
+    title = "Children's products are the top XGBoost feature",
+    subtitle = "Gain importance, top 12 features",
+    x = "Gain", y = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor = element_blank(), panel.grid.major.y = element_blank())
 ```
 
-## Model Agnostic Checks
+### Partial dependence and ICE
 
-```{r}
-X <- training |> select(-Survey.ResponseID, -Q.amazon.use.hh.size.num)
-y <- training$Q.amazon.use.hh.size.num
+An ICE plot draws one curve per respondent. With 3,027 rows that is 3,027 overlapping
+lines, which is why the original chart was a solid block of colour. Two changes make it
+readable:
 
-predictor <- Predictor$new(
-  model = learner_xgb_final,
-  data = X,
-  y = y,
-  predict.fun = function(model, newdata) {
-    model$predict_newdata(newdata)$response
-  }
+- draw a sample of 80 curves, faint, so the spread is visible but the page is not;
+- draw the partial-dependence average on top in bold.
+
+```{r ice-helper}
+# Build ICE curves and a PDP by hand.
+# iml::FeatureEffect plots every row, so this computes the same quantity with an
+# explicit sample size and returns a tidy frame we control.
+ice_pdp <- function(learner, data, feature, grid, n_ice = 80, seed = 1) {
+  set.seed(seed)
+  sample_rows <- data[sample(nrow(data), min(n_ice, nrow(data))), , drop = FALSE]
+
+  curves <- map(grid, function(value) {
+    d <- sample_rows
+    d[[feature]] <- value
+    learner$predict_newdata(d)$response
+  })
+
+  ice_matrix <- do.call(cbind, curves)
+
+  list(
+    ice = tibble(
+      id    = rep(seq_len(nrow(ice_matrix)), times = length(grid)),
+      value = rep(grid, each = nrow(ice_matrix)),
+      yhat  = as.vector(ice_matrix)
+    ),
+    pdp = tibble(value = grid, yhat = colMeans(ice_matrix))
+  )
+}
+
+# Quantile grid so the curves spend their resolution where the data actually is.
+quantile_grid <- function(x, n = 20, upper = 0.95) {
+  unique(quantile(x, probs = seq(0, upper, length.out = n), na.rm = TRUE))
+}
+```
+
+```{r model-pdp-children}
+children_effect <- ice_pdp(
+  lrn_xgb,
+  training |> select(-Survey.ResponseID, -Q.amazon.use.hh.size.num),
+  "children_items",
+  grid = quantile_grid(training$children_items)
 )
 
-ice_children <- FeatureEffect$new(predictor, feature = "children_items", method = "ice")
-ice_children$plot() + ggtitle("ICE Plot: Children Items")
-
-ice_total_spend <- FeatureEffect$new(predictor, feature = "total_spend", method = "ice")
-ice_total_spend$plot() + ggtitle("ICE Plot: Total Spending")
+ggplot() +
+  geom_line(data = children_effect$ice,
+            aes(x = value, y = yhat, group = id),
+            colour = "#e07a1f", alpha = 0.10, linewidth = 0.3) +
+  geom_line(data = children_effect$pdp,
+            aes(x = value, y = yhat),
+            colour = "#0b2545", linewidth = 1.3) +
+  labs(
+    title = "More children's products means a larger predicted household",
+    subtitle = "80 sampled ICE curves in orange; bold line is the partial-dependence average",
+    x = "Children's items purchased", y = "Predicted household size"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor = element_blank())
 ```
+
+```{r model-pdp-spend}
+spend_effect <- ice_pdp(
+  lrn_xgb,
+  training |> select(-Survey.ResponseID, -Q.amazon.use.hh.size.num),
+  "total_spend",
+  grid = quantile_grid(training$total_spend)
+)
+
+# Spend is heavily skewed, so the x-axis is log-scaled. Without that, every curve piles up
+# at the left edge and the shape is invisible.
+ggplot() +
+  geom_line(data = spend_effect$ice,
+            aes(x = value, y = yhat, group = id),
+            colour = "#2b6f8f", alpha = 0.10, linewidth = 0.3) +
+  geom_line(data = spend_effect$pdp,
+            aes(x = value, y = yhat),
+            colour = "#0b2545", linewidth = 1.3) +
+  scale_x_log10(labels = scales::dollar) +
+  labs(
+    title = "Total spend barely moves the prediction",
+    subtitle = "80 sampled ICE curves in blue; bold line is the partial-dependence average",
+    x = "Total spend over the observed period (log scale)", y = "Predicted household size"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor = element_blank())
+```
+
+The children's curve climbs and then levels off around 20 items; the spend curve is nearly
+horizontal. Spending more does not imply a bigger household; it mostly reflects how long the
+account has been active.
 
 ## Benchmarking
 
-```{r}
-task <- TaskRegr$new(
-  id = "hh_size",
-  backend = training |> select(-Survey.ResponseID),
-  target = "Q.amazon.use.hh.size.num"
-)
-
-lrn_lm <- lrn("regr.lm")
-
-graph_rf <- po("imputemedian") %>>%
-  lrn("regr.ranger", importance = "impurity")
-lrn_rf <- as_learner(graph_rf)
-
-graph_xgb <- po("imputemedian") %>>%
-  po("encode", method = "one-hot") %>>%
-  lrn(
-    "regr.xgboost",
-    eta = 0.09926108,
-    max_depth = 3,
-    min_child_weight = 9,
-    nrounds = 1571,
-    subsample = 0.9756695,
-    colsample_bytree = 0.8403539,
-    gamma = 3.487319,
-    nthread = 1,
-    verbose = 0
-  )
-lrn_xgb <- as_learner(graph_xgb)
-
-learners <- list(lrn_lm, lrn_rf, lrn_xgb)
-
+```{r benchmark}
 resampling <- rsmp("cv", folds = 10)
-resampling$instantiate(task)
 
 design <- benchmark_grid(
-  tasks = list(task),
-  learners = learners,
+  tasks       = list(task),
+  learners    = list(lrn_lm, lrn_rf, lrn_xgb),
   resamplings = list(resampling)
 )
 
 bmr <- benchmark(design)
 
+# Mean RMSE per learner.
 bmr$aggregate(msr("regr.rmse"))
-autoplot(bmr) + ggtitle("Benchmarking RMSE")
 ```
 
-## Final Predictions
+```{r benchmark-summary}
+# Fold-level scores, so the spread is visible instead of hidden behind a mean.
+fold_scores <- bmr$score(msr("regr.rmse"))
 
-```{r}
-hh_size_final <- data.frame(
-  Survey.ResponseID = testing$Survey.ResponseID,
-  Q.amazon.use.hh.size.num = xgb_predictions
+benchmark_summary <- fold_scores |>
+  group_by(learner_id) |>
+  summarize(
+    rmse_mean = mean(regr.rmse),
+    rmse_sd   = sd(regr.rmse),
+    rmse_min  = min(regr.rmse),
+    rmse_max  = max(regr.rmse),
+    .groups = "drop"
+  ) |>
+  arrange(rmse_mean) |>
+  # Fix the draw order once so both charts below agree on it.
+  mutate(learner = factor(learner_id, levels = learner_id))
+
+fold_scores <- fold_scores |>
+  mutate(learner = factor(learner_id, levels = benchmark_summary$learner_id))
+
+benchmark_summary
+```
+
+```{r benchmark-rmse}
+# Dot plot with fold spread. Overlapping ranges mean the ranking is not real.
+# The ten individual folds sit on top of the min-max bar so the spread is a distribution,
+# not just two endpoints.
+ggplot(benchmark_summary, aes(x = rmse_mean, y = learner)) +
+  geom_segment(aes(x = rmse_min, xend = rmse_max, yend = learner),
+               colour = "#e7dccd", linewidth = 4.5, lineend = "round") +
+  geom_point(data = fold_scores, aes(x = regr.rmse),
+             colour = "#0b2545", alpha = 0.45, size = 2.2,
+             position = position_jitter(height = 0.13, width = 0, seed = 1)) +
+  geom_point(size = 4.2, colour = "#e07a1f") +
+  geom_text(aes(label = sprintf("%.3f", rmse_mean)), vjust = -2, size = 3.6, colour = "#0b2545") +
+  scale_x_continuous(breaks = seq(1.02, 1.14, by = 0.02)) +
+  labs(
+    title = "Ten-fold cross-validated RMSE",
+    subtitle = "Orange dots are means, navy dots are the ten folds, bars span the full range",
+    x = "RMSE (household size units)", y = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor = element_blank(), panel.grid.major.y = element_blank())
+```
+
+```{r benchmark-folds}
+# Same numbers, fold by fold. Colours are assigned best to worst so the three lines stay
+# distinguishable without relying on ggplot's default palette.
+fold_colours <- setNames(
+  c("#e07a1f", "#2b6f8f", "#0b2545")[seq_len(nrow(benchmark_summary))],
+  benchmark_summary$learner_id
 )
 
-write.csv(hh_size_final, "hh_size_predictions_final.csv", row.names = FALSE)
+ggplot(fold_scores, aes(x = factor(iteration), y = regr.rmse, colour = learner_id)) +
+  geom_line(aes(group = learner_id), linewidth = 0.7, alpha = 0.7) +
+  geom_point(size = 1.9) +
+  scale_colour_manual(values = fold_colours) +
+  labs(
+    title = "Every fold puts the three models in the same band",
+    subtitle = "Fold-to-fold noise is larger than the gap between learners",
+    x = "Cross-validation fold", y = "RMSE", colour = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid.minor = element_blank(),
+    legend.position = "top"
+  )
 ```
+
+```{r benchmark-read}
+# How big is the gap relative to the noise?
+best  <- benchmark_summary |> slice_min(rmse_mean, n = 1)
+worst <- benchmark_summary |> slice_max(rmse_mean, n = 1)
+
+tibble(
+  spread_rmse   = worst$rmse_mean - best$rmse_mean,
+  typical_sd    = mean(benchmark_summary$rmse_sd),
+  spread_in_sd  = (worst$rmse_mean - best$rmse_mean) / mean(benchmark_summary$rmse_sd)
+)
+```
+
+The gap between the best and worst learner is smaller than one standard deviation of
+fold-to-fold variation. That is a tie. Reporting a winner here would be reading noise.
+
+## Predictions
+
+```{r predictions}
+# One rounding rule for all three models.
+# The target only ever takes 1, 2, 3 or 4, so a prediction of 0 or 5 is not a legal answer.
+# The original code rounded for LM and RF but not for XGBoost, which left decimals in the
+# final file. This clips every model the same way.
+finalize <- function(pred, lo = 1, hi = 4) {
+  pmin(pmax(round(pred), lo), hi)
+}
+
+testing_x <- testing |> select(-Survey.ResponseID, -Q.amazon.use.hh.size.num)
+
+pred_lm  <- finalize(predict(linear_model, newdata = testing))
+pred_rf  <- finalize(lrn_rf$predict_newdata(testing_x)$response)
+pred_xgb <- finalize(lrn_xgb$predict_newdata(testing_x)$response)
+
+# The best cross-validated learner is used for the final file.
+best_id <- best$learner_id
+
+final_predictions <- tibble(
+  Survey.ResponseID        = testing$Survey.ResponseID,
+  Q.amazon.use.hh.size.num = switch(
+    best_id,
+    "linear model"  = pred_lm,
+    "random forest" = pred_rf,
+    "xgboost"       = pred_xgb
+  )
+)
+
+table(final_predictions$Q.amazon.use.hh.size.num)
+```
+
+Almost every prediction lands on 2 or 3, with a handful of 4s and no 1s. That is what
+squared-error loss does: it pulls predictions toward the mean, so rare extreme households are
+never the best guess. For an RMSE target that shrinkage is correct. If the goal were exact
+class matches, an ordinal classifier would be the better tool.
+
+```{r write-outputs}
+# Predictions and the summary tables the site reads from.
+dir.create("outputs", showWarnings = FALSE)
+
+write.csv(final_predictions, "outputs/hh_size_predictions_final.csv", row.names = FALSE)
+write.csv(benchmark_summary,  "outputs/model_benchmark.csv",         row.names = FALSE)
+write.csv(by_household,       "outputs/eda_by_household.csv",        row.names = FALSE)
+write.csv(cor_table,          "outputs/feature_correlations.csv",    row.names = FALSE)
+write.csv(race_summary,       "outputs/eda_race.csv",                row.names = FALSE)
+write.csv(state_summary,      "outputs/eda_state.csv",               row.names = FALSE)
+
+# Where the results tables landed.
+list.files("outputs")
+```
+
+```{r session}
+sessionInfo()
+```
+
+## What changed from the submitted version
+
+| Issue | Submitted | Revised |
+|---|---|---|
+| Test rows | Scored as a holdout | Recognized as unlabeled; 10-fold CV only |
+| `purchase_freq` | Named "items per day", computed as lines per day | Renamed `purchase_lines_per_day` |
+| Time anchor | `Sys.Date()`, so results drifted daily | Fixed `SNAPSHOT_DATE` (2024-08-15) |
+| Categorical encoding | `as.numeric(factor(x))` invented an order | Real factors with dummies |
+| Rare states | Silently broke factor models | Pooled into "Other" below 20 respondents |
+| `children_items` | Included pet toys | Excludes pet categories |
+| `food_items` | Included pet food, storage containers, blenders | Exact category names only |
+| `multiuse_items` | Included skin cleansers, toothbrush heads, toilet seats | Paper and cleaning products only |
+| ICE plots | One line per respondent, unreadable | 80 sampled curves plus a bold PDP |
+| Model comparison | Chart labeled MSE that actually plotted RMSE, no spread | Labeled RMSE, with mean, SD and fold range |
+| Prediction outputs | Rounded for LM/RF, raw for XGBoost | One rounding and clipping rule for all |
+| Duplicate objects | `graph_xgb` defined twice | Single learner definition |
+
+## Limitations
+
+- **No holdout score.** The 2,000 test rows are unlabeled. Every number here is
+  cross-validated on 3,027 rows, and a cross-validated estimate is still an estimate on the
+  same people the model was built for.
+- **Target is censored at 4.** Households of 4 and 7 look identical to the model.
+- **Category bins are hand-written keyword rules.** They are reproducible and documented,
+  but they are not Amazon's taxonomy and they will miss products. The three bins are
+  approximate, and the food and consumables bins carry almost no signal.
+- **XGBoost was tuned on this data.** Its hyperparameters came from an earlier search on
+  the same rows, so its score is mildly optimistic relative to LM and RF defaults.
+- **Only three learners.** A LightGBM run from the original report is not reproduced here,
+  because it was fitted through a different pipeline and would not be comparable.
+- **Observational data.** Purchase behavior correlates with household size. It does not
+  establish that buying children's products causes a bigger household, or the reverse.
